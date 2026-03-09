@@ -33,7 +33,8 @@ Published: {article.get('published', 'Unknown')}
 Summary: {article.get('summary', 'No summary available')}
 Link: {article.get('link', '')}
 
-Provide a comprehensive analysis in the following JSON format:
+Provide a concise but comprehensive analysis in the following JSON format.
+Keep free-text fields reasonably short (e.g., thesis under 200 words) and limit lists to at most 5 items each:
 
 {{
     "catalyst_type": "M&A|regulatory|geopolitical|earnings|product_launch|management_change|other",
@@ -83,7 +84,7 @@ Return only valid JSON, no markdown formatting or additional text."""
             # Call Claude API
             message = self.client.messages.create(
                 model=self.model,
-                max_tokens=4000,
+                max_tokens=8000,
                 messages=[{
                     "role": "user",
                     "content": prompt
@@ -92,14 +93,34 @@ Return only valid JSON, no markdown formatting or additional text."""
             
             # Parse response
             response_text = message.content[0].text.strip()
-            
+
             # Extract JSON from response (handle markdown code blocks if present)
             if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0].strip()
+                response_text = response_text.split("```json", 1)[1].split("```", 1)[0].strip()
             elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0].strip()
-            
-            analysis = json.loads(response_text)
+                response_text = response_text.split("```", 1)[1].split("```", 1)[0].strip()
+
+            # Try to parse JSON, with a fallback that trims to the last complete brace
+            try:
+                analysis = json.loads(response_text)
+            except json.JSONDecodeError:
+                # Attempt to recover by trimming to the last closing brace
+                first_brace = response_text.find("{")
+                last_brace = response_text.rfind("}")
+                recovered = None
+                while first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                    candidate = response_text[first_brace:last_brace + 1]
+                    try:
+                        recovered = json.loads(candidate)
+                        break
+                    except json.JSONDecodeError:
+                        last_brace = response_text.rfind("}", 0, last_brace)
+
+                if recovered is None:
+                    # Re-raise to be handled by the outer json error handler
+                    raise
+
+                analysis = recovered
             
             # Add article metadata to analysis
             analysis['article_title'] = article.get('title', '')
