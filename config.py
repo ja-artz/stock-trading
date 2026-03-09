@@ -15,7 +15,9 @@ MAX_STORIES_TO_ANALYZE = 5
 GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"  # General news feed
 
 # LLM Settings
-ANTHROPIC_MODEL = "claude-sonnet-5-20250219"  # Claude Sonnet 5
+# Use a current, supported Anthropic Claude model ID
+# Latest balanced model as of March 2026
+ANTHROPIC_MODEL = "claude-sonnet-4-6"  # Claude Sonnet 4.6
 OPENAI_MODEL = "gpt-5-mini"  # Fallback or for structured data
 
 # Analysis Settings
