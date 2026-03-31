@@ -58,6 +58,29 @@ source .venv/bin/activate  # On macOS/Linux
 python main.py
 ```
 
+### Pipeline (Current)
+
+The runtime pipeline is:
+
+1. Collect fresh general news from Google News RSS.
+2. Run two retrieval passes:
+   - `headline` retrieval: major market-moving stories.
+   - `upside` retrieval: non-front-page stories with asymmetric potential.
+3. Each retrieval pass returns 3-5 stories.
+4. Merge and deduplicate the combined candidate pool.
+5. Run actionability triage to select the most actionable stories.
+6. For each story: fetch persona-neutral `shared_context`, then run three analyst profiles (`aggressive`, `moderate`, `minimal_risk`) with separate JSON briefs (including `portfolio_actions`).
+7. Print formatted output and save `recommendations_*.json`.
+
+### Configuration Knobs
+
+Key config values in `config.py`:
+
+- `RETRIEVAL_MIN_STORIES_PER_AGENT` (default `3`)
+- `RETRIEVAL_MAX_STORIES_PER_AGENT` (default `5`)
+- `ACTIONABLE_STORIES_TO_ANALYZE` (default `5`)
+- `ANALYST_PROFILES` (tuple of profile ids used for multi-persona analysis)
+
 ## Jupyter Notebooks
 
 To use Jupyter notebooks for development:
@@ -79,7 +102,8 @@ uv run jupyter lab
 ## Project Structure
 
 - `news_collector.py` - Collects news from Google News
-- `retrieval_agent.py` - LLM agent that selects top 3 news stories
-- `analysis_agent.py` - LLM agent that analyzes stories and generates recommendations
+- `retrieval_agent.py` - Dual-mode retrieval agent (`headline` + `upside`), each selecting 3-5 candidate stories
+- `analysis_agent.py` - Actionability triage + shared context + three-persona recommendation briefs per story
 - `main.py` - Main orchestration script
 - `config.py` - Configuration settings
+- `ARCHITECTURE.md` - Mermaid architecture diagram and component notes

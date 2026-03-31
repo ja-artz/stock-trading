@@ -1,51 +1,53 @@
-"""Retrieval agent that uses LLM to select the most relevant news stories for analysis."""
+"""Retrieval agent that selects stories for downstream analysis."""
 
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Literal
 from agents import Agent, Runner, function_tool
 from news_collector import NewsCollector
 import json
 import config
 
+RetrievalMode = Literal["headline", "upside"]
+
 
 class RetrievalAgent:
-    """LLM agent that selects top news stories for trading analysis using the agents library."""
-    
-    INSTRUCTIONS = """You are a financial analyst selecting news stories that could create trading opportunities in US stocks and options.
+    """LLM retrieval agent with mode-specific selection behavior."""
 
-Your goal is to identify ANY news stories that could impact markets, including:
-- Direct financial news (M&A, earnings, regulatory actions, policy changes)
-- Geopolitical events (wars, elections, trade disputes, sanctions)
-- Economic developments (inflation, interest rates, employment)
-- Technology breakthroughs or disruptions
-- Natural disasters or supply chain disruptions
-- Social/political events that affect industries
-- Company-specific news (product launches, management changes, partnerships)
-- Sector-wide developments
-- Second-order effects (e.g., geopolitical event → commodity prices → related stocks)
+    INSTRUCTIONS_BY_MODE = {
+        "headline": """You are a financial news selector focused on major market-moving headlines.
 
-Focus on stories that:
-1. Could impact publicly traded US companies (directly or indirectly)
-2. Are recent and timely (within last 24 hours preferred)
-3. Have sufficient detail to analyze potential market implications
-4. Have clear causal relationships to market movements
+Select stories that are likely to drive broad US market movement or major sector repricing.
+Prioritize high-visibility developments such as:
+- Central bank, inflation, or labor macro releases
+- Geopolitical and policy shifts
+- Earnings surprises, guidance shocks, and major corporate actions
+- Regulatory announcements with near-term market impact
+- Material commodity, rates, or FX catalysts
 
-You have access to a tool called fetch_news_from_rss that can retrieve real-time news from Google News RSS feeds.
-You can use this tool to fetch news articles, then analyze and select the most relevant ones.
+Avoid niche stories unless they are clearly market-moving.
 
-When selecting articles, return your selection as a JSON object with:
-- "articles": array of selected articles, each with "title", "source", and "summary" fields
-- "reasoning": brief explanation of why these articles were selected
+Return a JSON object with:
+- "articles": array of selected articles, each with "title", "source", and "summary"
+- "reasoning": brief explanation
 
-The articles array should be in this format:
-[
-    {
-        "source": "source name",
-        "title": "article title",
-        "summary": "article summary"
+Return JSON only, no markdown.""",
+        "upside": """You are a financial news selector focused on non-headline, high-upside opportunities.
+
+Select stories that are NOT likely to be front-page headlines but could create asymmetric upside/downside if validated.
+Prioritize under-the-radar catalysts such as:
+- Early supply-chain signals
+- Small policy/regulatory changes with second-order impact
+- Emerging technology or product milestones
+- Smaller company developments that can propagate to larger listed names
+- Industry-specific inflections not yet fully priced by broad sentiment
+
+Do NOT perform full trading recommendation analysis. Your job is only to surface promising candidate stories.
+
+Return a JSON object with:
+- "articles": array of selected articles, each with "title", "source", and "summary"
+- "reasoning": brief explanation
+
+Return JSON only, no markdown."""
     }
-]
-
-Format your response as JSON only, no markdown or additional text."""
     
     def __init__(self, model: str = "gpt-4o-mini"):
         """
@@ -84,20 +86,24 @@ Format your response as JSON only, no markdown or additional text."""
         
         self.fetch_news_tool = fetch_news_from_rss
         
-        # Create the agent with the tool
-        self.agent = Agent(
-            name="Retrieval Agent",
-            instructions=self.INSTRUCTIONS,
-            tools=[self.fetch_news_tool],
-            model=self.model
-        )
+        self.agents = {
+            mode: Agent(
+                name=f"Retrieval Agent ({mode})",
+                instructions=instructions,
+                tools=[self.fetch_news_tool],
+                model=self.model
+            )
+            for mode, instructions in self.INSTRUCTIONS_BY_MODE.items()
+        }
     
     async def select_top_stories(
         self, 
+        mode: RetrievalMode = "headline",
         news_articles: Optional[List[Dict]] = None,
         query: Optional[str] = None,
         num_results: int = 20,
-        max_stories: int = 3
+        min_stories: int = 3,
+        max_stories: int = 5
     ) -> Dict:
         """
         Use LLM agent to fetch and select the most relevant news stories for trading analysis.
@@ -106,12 +112,16 @@ Format your response as JSON only, no markdown or additional text."""
             news_articles: Optional list of news article dictionaries. If None, will fetch news using the tool.
             query: Optional search query to filter news (only used if news_articles is None)
             num_results: Number of articles to fetch (only used if news_articles is None)
+            mode: Retrieval mode ("headline" or "upside")
             max_stories: Maximum number of stories to select
             
         Returns:
             Dictionary with "articles" (list of {title, source, summary}) and "reasoning" (str)
         """
-        # If articles are provided, use them directly
+        if mode not in self.agents:
+            raise ValueError(f"Unsupported retrieval mode: {mode}")
+        max_stories = max(min_stories, max_stories)
+
         if news_articles is not None:
             if not news_articles:
                 return {"articles": [], "reasoning": "No articles provided"}
@@ -124,7 +134,7 @@ Format your response as JSON only, no markdown or additional text."""
 
 {articles_text}
 
-Select exactly {max_stories} articles that are most relevant for generating trading recommendations.
+Select between {min_stories} and {max_stories} articles based on the retrieval mode objective.
 
 Return your selection as a JSON object with:
 - "articles": array of selected articles, each with "title", "source", and "summary" fields
@@ -141,10 +151,9 @@ The articles array should be in this format:
 
 Format your response as JSON only, no markdown or additional text."""
         else:
-            # Use the agent to fetch and select news
             user_prompt = f"""Fetch recent news articles using the fetch_news_from_rss tool. 
 If you need to search for specific topics, use the query parameter (e.g., "stock market", "technology", "politics").
-Fetch at least {num_results} articles, then analyze them and select the top {max_stories} articles that are most relevant for generating trading recommendations.
+Fetch at least {num_results} articles, then select between {min_stories} and {max_stories} articles that best fit the retrieval mode objective.
 
 After fetching and analyzing the articles, return your selection as a JSON object with:
 - "articles": array of selected articles, each with "title", "source", and "summary" fields
@@ -163,7 +172,7 @@ Format your response as JSON only, no markdown or additional text."""
 
         try:
             # Run the agent
-            result = await Runner.run(self.agent, user_prompt)
+            result = await Runner.run(self.agents[mode], user_prompt)
             response_text = result.final_output.strip()
             
             # Extract JSON from response (handle markdown code blocks if present)
@@ -187,7 +196,23 @@ Format your response as JSON only, no markdown or additional text."""
                     }
                     formatted_articles.append(formatted_article)
             
-            print(f"Retrieval Agent Reasoning: {reasoning}")
+            if len(formatted_articles) < min_stories and news_articles:
+                seen_titles = {a.get("title", "") for a in formatted_articles}
+                for article in news_articles:
+                    title = article.get("title", "")
+                    if title and title not in seen_titles:
+                        formatted_articles.append(
+                            {
+                                "title": title,
+                                "source": article.get("source", "Unknown"),
+                                "summary": article.get("summary", "")
+                            }
+                        )
+                        seen_titles.add(title)
+                    if len(formatted_articles) >= min_stories:
+                        break
+
+            print(f"Retrieval Agent ({mode}) Reasoning: {reasoning}")
             print(f"Selected {len(formatted_articles)} articles for analysis\n")
             
             return {
