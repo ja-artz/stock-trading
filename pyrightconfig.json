@@ -4,5 +4,6 @@
   "pythonVersion": "3.9",
   "typeCheckingMode": "basic",
   "reportMissingImports": "warning",
-  "reportMissingModuleSource": "warning"
+  "reportMissingModuleSource": "warning",
+  "extraPaths": [".venv/Lib/site-packages"]
 }

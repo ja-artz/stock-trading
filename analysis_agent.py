@@ -1,8 +1,11 @@
 """Analysis agent for triage and multi-persona recommendation generation."""
 
 import asyncio
-from typing import List, Dict, Any
+import random
+import time
+from typing import List, Dict, Any, Optional
 from anthropic import Anthropic
+from anthropic import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 import json
 import config
 
@@ -51,13 +54,43 @@ class AnalysisAgent:
                     last_brace = response_text.rfind("}", 0, last_brace)
             raise
 
+    def _is_retryable_anthropic(self, exc: BaseException) -> bool:
+        if isinstance(exc, (APIConnectionError, APITimeoutError)):
+            return True
+        if isinstance(exc, RateLimitError):
+            return True
+        if isinstance(exc, APIStatusError):
+            return exc.status_code in (429, 500, 502, 503, 529)
+        return False
+
     def _message_create(self, prompt: str, max_tokens: int) -> str:
-        message = self.client.messages.create(
-            model=self.model,
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return self._extract_response_text(message)
+        """Call Anthropic with retries for transient overload / rate limits / server errors."""
+        max_attempts = getattr(config, "ANTHROPIC_MAX_RETRIES", 6)
+        base_delay = getattr(config, "ANTHROPIC_RETRY_BASE_DELAY_SEC", 2.0)
+        last_exc: Optional[BaseException] = None
+        for attempt in range(max_attempts):
+            try:
+                message = self.client.messages.create(
+                    model=self.model,
+                    max_tokens=max_tokens,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                return self._extract_response_text(message)
+            except Exception as e:
+                last_exc = e
+                if not self._is_retryable_anthropic(e) or attempt == max_attempts - 1:
+                    raise
+                delay = base_delay * (2**attempt) + random.uniform(0, 1.5)
+                code = getattr(e, "status_code", None)
+                if isinstance(e, APIStatusError):
+                    code = e.status_code
+                print(
+                    f"Anthropic transient error (attempt {attempt + 1}/{max_attempts}, "
+                    f"code={code}): {e!s}. Retrying in {delay:.1f}s..."
+                )
+                time.sleep(delay)
+        assert last_exc is not None
+        raise last_exc
 
     def _article_block(self, article: Dict) -> str:
         return f"""Title: {article.get('title', 'N/A')}
@@ -261,6 +294,85 @@ Return valid JSON only in this exact structure:
             print(f"\nAnalyzing story {i}/{len(articles)}: {article.get('title', 'Unknown')[:60]}...")
             analyses.append(await self.analyze_story_multi_profile_async(article))
         return analyses
+
+    def refine_envelope_for_invalid_tickers(
+        self,
+        article: Dict[str, Any],
+        envelope: Dict[str, Any],
+        invalid_tickers: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """
+        Second pass: rewrite the full analysis envelope so tickers align with real US listings.
+        Called when validation finds symbols that do not resolve via yfinance.
+        """
+        envelope_clean = {k: v for k, v in envelope.items() if k != "validation"}
+        inv = json.dumps(invalid_tickers, indent=2)
+        payload = json.dumps(envelope_clean, indent=2)
+        prompt = f"""You previously produced this multi-persona analysis JSON for a news story.
+
+Automated ticker validation reported these symbols as invalid or unresolvable (wrong, delisted, or hallucinated):
+{inv}
+
+News story (for context):
+{self._article_block(article)}
+
+Your task: return the COMPLETE analysis envelope again as valid JSON only (no markdown).
+Fix all issues:
+- Replace wrong tickers with correct US-listed symbols where the story clearly implies a company, or remove the row.
+- Update company_name in shared_context.affected_companies to match the corrected ticker.
+- Fix analyst_profiles.*.recommendations[].ticker and portfolio_actions[].instrument when the first token is a ticker.
+- Keep the same structure: article_title, article_link, article_published, retrieval_type, shared_context, analyst_profiles with keys {list(config.ANALYST_PROFILES)}.
+- If a persona had an error object, you may leave it or replace with a valid brief.
+- Do not add a "validation" key.
+
+Original envelope:
+{payload}"""
+
+        try:
+            text = self._message_create(prompt, max_tokens=16000)
+            parsed = self._parse_json_object(text)
+            for key in ("article_title", "article_link", "article_published", "retrieval_type"):
+                if key in envelope_clean and key not in parsed:
+                    parsed[key] = envelope_clean[key]
+            return parsed
+        except Exception as e:
+            print(f"Ticker refinement parse failed: {e}")
+            envelope_clean["refinement_error"] = str(e)
+            return envelope_clean
+
+    async def validate_and_refine_envelopes_async(
+        self, articles: List[Dict], analyses: List[Dict]
+    ) -> List[Dict]:
+        """Attach validation; optionally one LLM refinement pass when tickers fail checks."""
+        from validation import validate_envelope
+
+        out: List[Dict[str, Any]] = []
+        for article, env in zip(articles, analyses):
+            if "analyst_profiles" not in env:
+                out.append(env)
+                continue
+
+            report = await asyncio.to_thread(validate_envelope, article, env)
+            meta: Dict[str, Any] = {"initial": report, "refinement_applied": False}
+
+            if report.get("invalid_tickers") and config.ENABLE_TICKER_REFINEMENT_LOOP:
+                print(f"  Ticker refinement: {env.get('article_title', '')[:55]}...")
+                refined = await asyncio.to_thread(
+                    self.refine_envelope_for_invalid_tickers,
+                    article,
+                    env,
+                    report["invalid_tickers"],
+                )
+                meta["refinement_applied"] = True
+                refined["validation"] = meta
+                refined["validation"]["after_refinement"] = await asyncio.to_thread(
+                    validate_envelope, article, refined
+                )
+                out.append(refined)
+            else:
+                env["validation"] = meta
+                out.append(env)
+        return out
 
 
 if __name__ == "__main__":

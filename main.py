@@ -301,7 +301,11 @@ async def main():
     formatted_articles = enrich_selected_articles(selected_actionable, articles)
     print(f"\nStep 3: Analyzing {len(formatted_articles)} selected stories...")
     analyses = await analysis_agent.analyze_stories_async(formatted_articles)
-    
+    print("\nValidating stories and tickers; refining recommendations if needed...")
+    analyses = await analysis_agent.validate_and_refine_envelopes_async(
+        formatted_articles, analyses
+    )
+
     # Step 4: Display results
     print("\n" + "=" * 80)
     print("RESULTS")

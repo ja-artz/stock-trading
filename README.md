@@ -70,7 +70,14 @@ The runtime pipeline is:
 4. Merge and deduplicate the combined candidate pool.
 5. Run actionability triage to select the most actionable stories.
 6. For each story: fetch persona-neutral `shared_context`, then run three analyst profiles (`aggressive`, `moderate`, `minimal_risk`) with separate JSON briefs (including `portfolio_actions`).
-7. Print formatted output and save `recommendations_*.json`.
+7. Validate article URLs and ticker symbols (see **Validation** below); optionally send failed tickers back through the analysis model once to correct recommendations.
+8. Print formatted output and save `recommendations_*.json`.
+
+### Validation
+
+The pipeline checks that story links respond over HTTP and that equity tickers used in the analysis JSON resolve via **yfinance** (no extra API keys). Results are stored under each story’s `validation` field in the output JSON.
+
+**Future improvement:** swap or supplement this with a dedicated market-data or exchange API (and optionally a news cross-check API) once you add API keys. Update `validation.py` and `config.py` when you do, and document new env vars here.
 
 ### Configuration Knobs
 
@@ -80,6 +87,8 @@ Key config values in `config.py`:
 - `RETRIEVAL_MAX_STORIES_PER_AGENT` (default `5`)
 - `ACTIONABLE_STORIES_TO_ANALYZE` (default `5`)
 - `ANALYST_PROFILES` (tuple of profile ids used for multi-persona analysis)
+- `VALIDATION_URL_TIMEOUT` (seconds for HTTP checks on article URLs)
+- `ENABLE_TICKER_REFINEMENT_LOOP` (when True, one extra LLM pass to fix invalid tickers)
 
 ## Jupyter Notebooks
 
@@ -103,7 +112,8 @@ uv run jupyter lab
 
 - `news_collector.py` - Collects news from Google News
 - `retrieval_agent.py` - Dual-mode retrieval agent (`headline` + `upside`), each selecting 3-5 candidate stories
-- `analysis_agent.py` - Actionability triage + shared context + three-persona recommendation briefs per story
+- `analysis_agent.py` - Actionability triage + shared context + three-persona recommendation briefs per story + optional ticker refinement
+- `validation.py` - HTTP URL check + yfinance ticker validation (no paid API keys)
 - `main.py` - Main orchestration script
 - `config.py` - Configuration settings
 - `ARCHITECTURE.md` - Mermaid architecture diagram and component notes
