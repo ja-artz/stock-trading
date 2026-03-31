@@ -244,18 +244,19 @@ async def main():
     print("\nStep 2: Running dual retrieval agents...")
     retrieval_agent = RetrievalAgent()
 
-    headline_result = await retrieval_agent.select_top_stories(
-        mode="headline",
-        news_articles=articles,
-        min_stories=config.RETRIEVAL_MIN_STORIES_PER_AGENT,
-        max_stories=config.RETRIEVAL_MAX_STORIES_PER_AGENT
-    )
-
-    upside_result = await retrieval_agent.select_top_stories(
-        mode="upside",
-        news_articles=articles,
-        min_stories=config.RETRIEVAL_MIN_STORIES_PER_AGENT,
-        max_stories=config.RETRIEVAL_MAX_STORIES_PER_AGENT
+    headline_result, upside_result = await asyncio.gather(
+        retrieval_agent.select_top_stories(
+            mode="headline",
+            news_articles=articles,
+            min_stories=config.RETRIEVAL_MIN_STORIES_PER_AGENT,
+            max_stories=config.RETRIEVAL_MAX_STORIES_PER_AGENT,
+        ),
+        retrieval_agent.select_top_stories(
+            mode="upside",
+            news_articles=articles,
+            min_stories=config.RETRIEVAL_MIN_STORIES_PER_AGENT,
+            max_stories=config.RETRIEVAL_MAX_STORIES_PER_AGENT,
+        ),
     )
 
     headline_articles = [
@@ -299,7 +300,7 @@ async def main():
 
     formatted_articles = enrich_selected_articles(selected_actionable, articles)
     print(f"\nStep 3: Analyzing {len(formatted_articles)} selected stories...")
-    analyses = analysis_agent.analyze_stories(formatted_articles)
+    analyses = await analysis_agent.analyze_stories_async(formatted_articles)
     
     # Step 4: Display results
     print("\n" + "=" * 80)

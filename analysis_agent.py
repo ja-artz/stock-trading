@@ -1,5 +1,6 @@
 """Analysis agent for triage and multi-persona recommendation generation."""
 
+import asyncio
 from typing import List, Dict, Any
 from anthropic import Anthropic
 import json
@@ -161,9 +162,9 @@ Guidelines:
         except Exception as e:
             return {"error": str(e), "profile_id": profile_id}
 
-    def analyze_story_multi_profile(self, article: Dict) -> Dict[str, Any]:
+    async def analyze_story_multi_profile_async(self, article: Dict) -> Dict[str, Any]:
         """
-        One shared_context call plus one brief per analyst profile.
+        One shared_context call, then three persona briefs in parallel (async gather).
         Returns envelope: article metadata, shared_context, analyst_profiles.
         """
         title = article.get("title", "")
@@ -177,7 +178,9 @@ Guidelines:
         }
 
         try:
-            envelope["shared_context"] = self.fetch_shared_context(article)
+            envelope["shared_context"] = await asyncio.to_thread(
+                self.fetch_shared_context, article
+            )
         except Exception as e:
             print(f"Error fetching shared_context: {e}")
             envelope["shared_context"] = {
@@ -191,9 +194,14 @@ Guidelines:
 
         shared = envelope["shared_context"]
 
-        for pid in config.ANALYST_PROFILES:
-            print(f"    Profile: {pid}...")
-            envelope["analyst_profiles"][pid] = self.analyze_story_for_profile(article, pid, shared)
+        tasks = [
+            asyncio.to_thread(self.analyze_story_for_profile, article, pid, shared)
+            for pid in config.ANALYST_PROFILES
+        ]
+        print(f"    Personas (parallel): {', '.join(config.ANALYST_PROFILES)}")
+        briefs = await asyncio.gather(*tasks)
+        for pid, brief in zip(config.ANALYST_PROFILES, briefs):
+            envelope["analyst_profiles"][pid] = brief
 
         return envelope
 
@@ -247,11 +255,11 @@ Return valid JSON only in this exact structure:
                 "reasoning": f"Fallback selection used due to triage error: {e}",
             }
 
-    def analyze_stories(self, articles: List[Dict]) -> List[Dict]:
+    async def analyze_stories_async(self, articles: List[Dict]) -> List[Dict]:
         analyses = []
         for i, article in enumerate(articles, 1):
             print(f"\nAnalyzing story {i}/{len(articles)}: {article.get('title', 'Unknown')[:60]}...")
-            analyses.append(self.analyze_story_multi_profile(article))
+            analyses.append(await self.analyze_story_multi_profile_async(article))
         return analyses
 
 
@@ -266,5 +274,5 @@ if __name__ == "__main__":
     }
 
     agent = AnalysisAgent()
-    result = agent.analyze_story_multi_profile(test_article)
+    result = asyncio.run(agent.analyze_story_multi_profile_async(test_article))
     print(json.dumps(result, indent=2))

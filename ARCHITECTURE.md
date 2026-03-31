@@ -68,9 +68,9 @@ flowchart TD
 ## Runtime Sequence (Current)
 
 1. Fetch recent general news (`NewsCollector.get_general_news`).
-2. Run dual retrieval (`RetrievalAgent.select_top_stories` in `headline` and `upside` modes).
+2. Run dual retrieval in parallel (`asyncio.gather` on `headline` and `upside` `select_top_stories`).
 3. Merge and deduplicate candidate pools in `main.py`.
 4. Triage candidates for actionability (`AnalysisAgent.select_actionable_stories`).
-5. Analyze selected stories in depth (`AnalysisAgent.analyze_stories` -> `analyze_story_multi_profile`: shared context + three personas).
+5. Analyze selected stories in depth (`AnalysisAgent.analyze_stories_async`: shared context, then three personas via `asyncio.gather` on thread-backed API calls).
 6. Print formatted recommendations.
 7. Save JSON output file with timestamp.
