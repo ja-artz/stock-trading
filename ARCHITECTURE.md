@@ -29,7 +29,7 @@ flowchart TD
 
 ## Runtime sequence
 
-1. **Daily:** Collect RSS → headline + upside retrieval → triage → shared context + three personas → validate tickers → `analysis_runs` table (+ optional JSON export).
+1. **Daily:** Collect RSS → headline + upside retrieval → triage → shared context (with story domain) → optional indirect-effects mapper for macro stories → three personas → validate tickers → `analysis_runs` table (+ optional JSON export).
 2. **Weekly:** For each active portfolio, trader agent reads latest analysis + NAV/positions + rules → `weekly_plans` + `plan_items`.
 3. **Human:** Review plan in UI; accept/reject items; log trades in Sofi; record via `POST /trades`.
 4. **Insights:** `performance_agent` summarizes metrics and decisions.

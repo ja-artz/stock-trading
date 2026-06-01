@@ -115,7 +115,28 @@ def _collect_ticker_paths(envelope: Dict[str, Any]) -> List[Tuple[str, str]]:
             inst = pa.get("instrument") or ""
             for tok in _instrument_candidate_tokens(inst):
                 pairs.append((f"analyst_profiles.{pid}.portfolio_actions[{k}].instrument", tok))
+    ie = envelope.get("indirect_effects") or {}
+    if ie.get("enabled"):
+        for ci, chain in enumerate(ie.get("causal_chains") or []):
+            if not isinstance(chain, dict):
+                continue
+            for ti, row in enumerate(chain.get("tickers") or []):
+                t = _normalize_equity_ticker(row.get("ticker") if isinstance(row, dict) else None)
+                if t:
+                    pairs.append((f"indirect_effects.causal_chains[{ci}].tickers[{ti}].ticker", t))
     return pairs
+
+
+def collect_tickers_from_envelope(envelope: Dict[str, Any]) -> Set[str]:
+    return {sym for _, sym in _collect_ticker_paths(envelope)}
+
+
+def collect_tickers_from_stories(stories: List[Dict[str, Any]]) -> Set[str]:
+    seen: Set[str] = set()
+    for story in stories:
+        if isinstance(story, dict):
+            seen |= collect_tickers_from_envelope(story)
+    return seen
 
 
 def validate_envelope(article: Dict[str, Any], envelope: Dict[str, Any]) -> Dict[str, Any]:

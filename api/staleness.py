@@ -1,4 +1,4 @@
-"""Staleness helpers for weekly plans."""
+"""Staleness helpers for trading plans (analysis freshness)."""
 
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo

@@ -40,6 +40,12 @@ VALIDATION_URL_TIMEOUT = 8
 # When ticker checks fail, ask the analysis LLM to rewrite the envelope once
 ENABLE_TICKER_REFINEMENT_LOOP = True
 
+# Indirect (2nd/3rd order) effects analysis for non-market-direct stories
+ENABLE_INDIRECT_EFFECTS_ANALYSIS = True
+INDIRECT_MAX_CHAINS = 3
+TRADER_MAX_INDIRECT_ITEMS_PER_PLAN = 1
+INDIRECT_MIN_CONFIDENCE_FOR_BUY = 6
+
 # Persistence
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/app.db")
 DATA_DIR = os.getenv("DATA_DIR", "data")

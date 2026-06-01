@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from core.db import db_session, row_to_dict
+from core.instruments import (
+    OPTION_CONTRACT_MULTIPLIER,
+    apply_buy_to_cash,
+    apply_sell_to_cash,
+    is_option_instrument_type,
+    trade_notional,
+)
 from core.pricing import get_last_price
 from core.rules import is_option_instrument
-
-
-def _empty_positions() -> List[dict]:
-    return []
 
 
 def compute_positions_from_ledger(portfolio_id: int) -> Tuple[float, List[dict]]:
@@ -51,11 +53,14 @@ def compute_positions_from_ledger(portfolio_id: int) -> Tuple[float, List[dict]]
             }
         h = holdings[key]
         if side == "buy":
-            cash -= qty * price + fees
-            h["cost_basis_total"] += qty * price
+            cash = apply_buy_to_cash(cash, qty, price, inst, fees)
+            h["cost_basis_total"] += trade_notional(qty, price, inst)
             h["quantity"] += qty
         elif side == "sell":
-            cash += qty * price - fees
+            cash = apply_sell_to_cash(cash, qty, price, inst, fees)
+            if h["quantity"] > 1e-9:
+                sold_frac = min(1.0, qty / h["quantity"])
+                h["cost_basis_total"] *= 1.0 - sold_frac
             h["quantity"] -= qty
             if h["quantity"] <= 1e-9:
                 h["quantity"] = 0.0
@@ -65,21 +70,34 @@ def compute_positions_from_ledger(portfolio_id: int) -> Tuple[float, List[dict]]
     for h in holdings.values():
         if abs(h["quantity"]) < 1e-9:
             continue
-        mark = get_last_price(h["ticker"]) or 0.0
-        if is_option_instrument(h["instrument_type"]):
-            mark = mark * 100 * abs(h["quantity"]) / max(abs(h["quantity"]), 1)
-        avg_cost = h["cost_basis_total"] / h["quantity"] if h["quantity"] else 0.0
-        market_value = mark * h["quantity"] if not is_option_instrument(h["instrument_type"]) else mark
+        qty = h["quantity"]
+        cost_total = h["cost_basis_total"]
+        inst = h["instrument_type"]
+
+        if is_option_instrument_type(inst):
+            # Paper book: mark options at cost (premium paid) until we have option quotes.
+            premium_per_share = cost_total / (qty * OPTION_CONTRACT_MULTIPLIER) if qty else 0.0
+            mark = premium_per_share
+            market_value = cost_total
+            avg_cost_display = cost_total / qty if qty else 0.0
+        else:
+            mark = get_last_price(h["ticker"]) or 0.0
+            if mark <= 0 and qty > 0:
+                mark = cost_total / qty
+            market_value = mark * qty
+            avg_cost_display = cost_total / qty if qty else 0.0
+
         positions.append(
             {
                 "ticker": h["ticker"],
-                "instrument_type": h["instrument_type"],
-                "quantity": h["quantity"],
-                "avg_cost": avg_cost,
+                "instrument_type": inst,
+                "quantity": qty,
+                "avg_cost": avg_cost_display,
                 "mark_price": mark,
                 "market_value": market_value,
                 "strike": h.get("strike"),
                 "expiry": h.get("expiry"),
+                "is_option": is_option_instrument_type(inst),
             }
         )
     return cash, positions
@@ -100,9 +118,9 @@ def compute_nav(portfolio_id: int) -> dict:
 
 
 def is_new_position(portfolio_id: int, ticker: str) -> bool:
-    cash, positions = compute_positions_from_ledger(portfolio_id)
+    _, positions = compute_positions_from_ledger(portfolio_id)
     for p in positions:
-        if p["ticker"].upper() == ticker.upper() and abs(p["quantity"]) > 1e-9:
+        if p["ticker"].upper() == ticker.upper() and abs(p["quantity"]) > 0:
             return False
     return True
 

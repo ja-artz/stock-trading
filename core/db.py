@@ -79,6 +79,14 @@ CREATE TABLE IF NOT EXISTS plan_items (
     instrument_type TEXT,
     horizon TEXT,
     size_hint TEXT,
+    suggested_notional_usd REAL,
+    suggested_quantity REAL,
+    quantity_unit TEXT,
+    pct_nav REAL,
+    pct_cash REAL,
+    pct_position REAL,
+    sizing_summary TEXT,
+    detail_json TEXT,
     persona_consensus TEXT,
     rationale TEXT,
     rule_warnings TEXT,
@@ -186,9 +194,29 @@ def db_session() -> Generator[sqlite3.Connection, None, None]:
         conn.close()
 
 
+_PLAN_ITEM_SIZING_COLUMNS = (
+    ("suggested_notional_usd", "REAL"),
+    ("suggested_quantity", "REAL"),
+    ("quantity_unit", "TEXT"),
+    ("pct_nav", "REAL"),
+    ("pct_cash", "REAL"),
+    ("pct_position", "REAL"),
+    ("sizing_summary", "TEXT"),
+    ("detail_json", "TEXT"),
+)
+
+
+def _migrate_plan_item_sizing(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(plan_items)").fetchall()}
+    for name, col_type in _PLAN_ITEM_SIZING_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE plan_items ADD COLUMN {name} {col_type}")
+
+
 def init_db() -> None:
     with db_session() as conn:
         conn.executescript(_SCHEMA)
+        _migrate_plan_item_sizing(conn)
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:

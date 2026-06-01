@@ -15,6 +15,9 @@ def _format_shared_context_block(sc: dict) -> list:
     lines = []
     if not sc:
         return ["  (no shared context)"]
+    lines.append(f"  Domain: {sc.get('story_domain', 'N/A')}")
+    if sc.get("run_indirect_analysis") is not None:
+        lines.append(f"  Indirect analysis: {sc.get('run_indirect_analysis')}")
     lines.append(f"  Catalyst: {sc.get('catalyst_type', 'N/A')}")
     lines.append(f"  Timeline: {sc.get('timeline', 'N/A')}")
     lines.append(f"  Confidence: {sc.get('confidence', 'N/A')}/10")
@@ -33,6 +36,32 @@ def _format_shared_context_block(sc: dict) -> list:
                 f"    - {company.get('ticker', 'N/A')} ({company.get('company_name', 'N/A')}) "
                 f"impact={company.get('impact_type', 'N/A')} dir={company.get('expected_direction', 'N/A')}"
             )
+    return lines
+
+
+def _format_indirect_effects_block(ie: dict) -> list:
+    lines = []
+    if not ie or not ie.get("enabled"):
+        reason = ie.get("skip_reason") if ie else None
+        if reason:
+            lines.append(f"  (indirect effects skipped: {reason})")
+        return lines
+    lines.append("  Indirect effects (2nd/3rd order hypotheses):")
+    for discarded in ie.get("discarded_obvious") or []:
+        lines.append(f"    Crowded / skipped: {discarded}")
+    for i, chain in enumerate(ie.get("causal_chains") or [], 1):
+        order = chain.get("order", "?")
+        lines.append(f"    Chain {i} (order {order}): {chain.get('thesis_one_liner', '')}")
+        for step in chain.get("steps") or []:
+            lines.append(f"      → {step}")
+        for t in chain.get("tickers") or []:
+            lines.append(
+                f"      {t.get('ticker')} ({t.get('role')}) conf={t.get('confidence')}/10 "
+                f"priced_risk={chain.get('already_priced_risk')}"
+            )
+        fals = chain.get("falsifiers") or []
+        if fals:
+            lines.append(f"      Falsifiers: {'; '.join(fals)}")
     return lines
 
 
@@ -114,6 +143,10 @@ def format_recommendations(analyses: list) -> str:
         if "analyst_profiles" in analysis:
             output.append("\nShared context (factual):")
             output.extend(_format_shared_context_block(analysis.get("shared_context") or {}))
+            indirect_lines = _format_indirect_effects_block(analysis.get("indirect_effects") or {})
+            if indirect_lines:
+                output.append("")
+                output.extend(indirect_lines)
             profiles = analysis.get("analyst_profiles") or {}
             for pid in config.ANALYST_PROFILES:
                 brief = profiles.get(pid, {})

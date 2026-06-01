@@ -8,6 +8,8 @@ from datetime import datetime
 from typing import Any, List, Optional
 from zoneinfo import ZoneInfo
 
+from core.instruments import is_option_instrument_type, trade_notional
+
 DEFAULT_RULES: dict[str, Any] = {
     "max_position_pct_nav": 33,
     "max_new_positions_per_week": 5,
@@ -73,7 +75,7 @@ def validate_trade(
 ) -> List[RuleViolation]:
     violations: List[RuleViolation] = []
     side_l = side.lower()
-    notional = abs(quantity) * price
+    notional = trade_notional(quantity, price, instrument_type)
 
     if is_option_instrument(instrument_type) and not rules.get("options_allowed", True):
         violations.append(RuleViolation("options_disabled", "Options are not allowed by trading rules."))
@@ -121,7 +123,13 @@ def validate_trade(
         current_pos = next((p for p in positions if p.get("ticker", "").upper() == ticker.upper()), None)
         current_val = 0.0
         if current_pos:
-            current_val = abs(current_pos.get("quantity", 0)) * current_pos.get("mark_price", price)
+            current_val = float(current_pos.get("market_value") or 0)
+            if current_val <= 0:
+                current_val = trade_notional(
+                    current_pos.get("quantity", 0),
+                    current_pos.get("mark_price", price),
+                    current_pos.get("instrument_type", "stock"),
+                )
         if current_val + notional > max_pos_value * 1.05:
             violations.append(
                 RuleViolation(
