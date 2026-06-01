@@ -210,3 +210,5 @@ __marimo__/
 # Project-specific generated files
 workspace.ipynb
 recommendations_*.json
+data/
+!data/.gitkeep

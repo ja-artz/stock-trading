@@ -1,119 +1,69 @@
 # stock-trading
 
-This is software that is designed to enable a simple strategy for recommending stock trades based on current events.
+Household paper-trading platform: daily news analysis (three risk personas), weekly trader plans per portfolio, manual Sofi trade logging, and insights.
 
 ## Setup
 
-1. Install `uv` if you haven't already:
+1. Install [uv](https://docs.astral.sh/uv/) and sync:
+
 ```bash
-# On macOS/Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# On Windows
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-
-# Or via pip
-pip install uv
-```
-
-2. Install dependencies with uv:
-```bash
-# Option 1: Install dependencies only (recommended for script projects)
 uv sync --no-install-project
-
-# Option 2: Full sync (if the above doesn't work, try this)
-uv sync
 ```
 
-3. Configure your IDE to use the virtual environment:
-   - **VS Code/Cursor**: Press `Ctrl+Shift+P` (or `Cmd+Shift+P` on Mac), type "Python: Select Interpreter", and choose the `.venv` Python interpreter
-   - The `pyrightconfig.json` file should help the linter find the packages automatically
+2. Copy `.env.example` to `.env` and set `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and optionally `HOUSEHOLD_API_KEY`.
 
-4. (Optional) Set up Jupyter kernel for notebooks:
+3. Seed the database (one shared $1,000 portfolio):
+
 ```bash
-# After running uv sync, install the kernel
-uv run python -m ipykernel install --user --name=stock-trading --display-name "Python (stock-trading)"
+uv run python scripts/seed_household.py
 ```
 
-4. Copy `.env.example` to `.env` and add your API keys:
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `uv run python main.py` | Daily news + analyst pipeline (persists to SQLite) |
+| `uv run python -m jobs.daily` | Same as daily job |
+| `uv run python -m jobs.weekly` | Weekly trader plan per active portfolio |
+| `uv run uvicorn api.main:app --reload` | API on http://127.0.0.1:8000 |
+| `cd web && npm install && npm run dev` | Web UI on http://127.0.0.1:5173 (proxies `/api` → API) |
+
+### Docker (optional)
+
 ```bash
-cp .env.example .env
+docker compose up --build
 ```
 
-5. Edit `.env` and add your:
-   - `ANTHROPIC_API_KEY`
-   - `OPENAI_API_KEY`
+SQLite lives at `./data/app.db` (bind-mounted). No separate database container.
 
-## Usage
+## Trading rules (default)
 
-Run the main script:
-```bash
-# Using uv (recommended)
-uv run python main.py
+- Max **33%** of NAV per position  
+- Max **5** new positions per week (Pacific, week starts Monday)  
+- **10%** cash floor  
+- Max **2** open option positions  
+- Options and shorts allowed  
+- Weekly plan default: **Sunday 6:00 PM Pacific** (use Task Scheduler + `jobs.weekly --trigger scheduled`)  
+- Trades intended within **24 hours** of plan (tracked, not blocking)
 
-# Or activate the virtual environment first
-source .venv/bin/activate  # On macOS/Linux
-# or
-.venv\Scripts\activate  # On Windows
-python main.py
-```
+## API (summary)
 
-### Pipeline (Current)
+- `GET /dashboard`, `GET /stories`, `GET /plans/current` (includes staleness banner fields)  
+- `POST /runs/daily`, `POST /runs/weekly` (requires `X-API-Key` if `HOUSEHOLD_API_KEY` set)  
+- `POST /trades`, `PATCH /plans/items/{id}/decision`  
+- `GET /insights/latest`, `POST /insights/generate`  
 
-The runtime pipeline is:
+## Project layout
 
-1. Collect fresh general news from Google News RSS.
-2. Run two retrieval passes:
-   - `headline` retrieval: major market-moving stories.
-   - `upside` retrieval: non-front-page stories with asymmetric potential.
-3. Each retrieval pass returns 3-5 stories.
-4. Merge and deduplicate the combined candidate pool.
-5. Run actionability triage to select the most actionable stories.
-6. For each story: fetch persona-neutral `shared_context`, then run three analyst profiles (`aggressive`, `moderate`, `minimal_risk`) with separate JSON briefs (including `portfolio_actions`).
-7. Validate article URLs and ticker symbols (see **Validation** below); optionally send failed tickers back through the analysis model once to correct recommendations.
-8. Print formatted output and save `recommendations_*.json`.
+- `core/` — SQLite, portfolio, ledger, rules, snapshots  
+- `pipeline/` — daily analysis  
+- `trader_agent.py` — weekly plan per portfolio  
+- `performance_agent.py` — lessons / metrics  
+- `api/` — FastAPI  
+- `web/` — React UI  
+- `jobs/` — CLI schedulers  
+- `data/` — `app.db` and exports (gitignored)
 
-### Validation
+## Validation
 
-The pipeline checks that story links respond over HTTP and that equity tickers used in the analysis JSON resolve via **yfinance** (no extra API keys). Results are stored under each story’s `validation` field in the output JSON.
-
-**Future improvement:** swap or supplement this with a dedicated market-data or exchange API (and optionally a news cross-check API) once you add API keys. Update `validation.py` and `config.py` when you do, and document new env vars here.
-
-### Configuration Knobs
-
-Key config values in `config.py`:
-
-- `RETRIEVAL_MIN_STORIES_PER_AGENT` (default `3`)
-- `RETRIEVAL_MAX_STORIES_PER_AGENT` (default `5`)
-- `ACTIONABLE_STORIES_TO_ANALYZE` (default `5`)
-- `ANALYST_PROFILES` (tuple of profile ids used for multi-persona analysis)
-- `VALIDATION_URL_TIMEOUT` (seconds for HTTP checks on article URLs)
-- `ENABLE_TICKER_REFINEMENT_LOOP` (when True, one extra LLM pass to fix invalid tickers)
-
-## Jupyter Notebooks
-
-To use Jupyter notebooks for development:
-
-1. After installing dependencies, register the kernel:
-```bash
-uv run python -m ipykernel install --user --name=stock-trading --display-name "Python (stock-trading)"
-```
-
-2. Launch Jupyter:
-```bash
-uv run jupyter notebook
-# or
-uv run jupyter lab
-```
-
-3. When creating a new notebook, select "Python (stock-trading)" as the kernel.
-
-## Project Structure
-
-- `news_collector.py` - Collects news from Google News
-- `retrieval_agent.py` - Dual-mode retrieval agent (`headline` + `upside`), each selecting 3-5 candidate stories
-- `analysis_agent.py` - Actionability triage + shared context + three-persona recommendation briefs per story + optional ticker refinement
-- `validation.py` - HTTP URL check + yfinance ticker validation (no paid API keys)
-- `main.py` - Main orchestration script
-- `config.py` - Configuration settings
-- `ARCHITECTURE.md` - Mermaid architecture diagram and component notes
+Story URLs and tickers are checked via HTTP + yfinance (see `validation.py`).

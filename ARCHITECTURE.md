@@ -1,76 +1,44 @@
 # Stock Trading Project Architecture
 
-This diagram reflects the current implementation state of the project.
-
 ```mermaid
 flowchart TD
-    U["User CLI Run"] --> M["main.py Orchestrator"]
+    U[User CLI or Web] --> M[main.py / jobs]
+    U --> API[api/main.py FastAPI]
+    API --> WEB[web React]
 
-    M --> C["config.py Env and runtime settings"]
-    C --> E[".env and OS Environment Variables"]
+    M --> P[pipeline/daily_analysis.py]
+    P --> NC[news_collector.py]
+    P --> RA[retrieval_agent.py]
+    P --> AA[analysis_agent.py]
+    P --> VAL[validation.py]
 
-    M --> NC["NewsCollector news_collector.py"]
-    NC --> GN["Google News RSS"]
-    NC --> WS["Article Web Pages requests and BeautifulSoup summary fallback"]
-    NC --> A1["Raw Articles title source summary published link"]
+    M --> DB[(SQLite data/app.db)]
+    API --> DB
+    P --> DB
 
-    M --> RAH["RetrievalAgent headline mode"]
-    M --> RAU["RetrievalAgent upside mode"]
-    RAH --> OA["OpenAI Agents SDK Agent and Runner"]
-    RAU --> OA
-    OA --> OM["OpenAI Model default gpt-4o-mini"]
-    RAH --> FT["function_tool fetch_news_from_rss"]
-    RAU --> FT
-    FT --> NC
-    A1 --> RAH
-    A1 --> RAU
-    RAH --> H1["Headline Candidates 3 to 5"]
-    RAU --> U1["Upside Candidates 3 to 5"]
+    J[jobs/weekly.py] --> TA[trader_agent.py]
+    TA --> DB
+    TA --> AA
 
-    M --> MA["Merge and Deduplicate candidates"]
-    H1 --> MA
-    U1 --> MA
-    MA --> A2["Merged Candidate Pool"]
+    API --> LED[core/ledger.py]
+    LED --> PORT[core/portfolio.py]
+    PORT --> SNAP[core/snapshots.py]
 
-    M --> AA["AnalysisAgent analysis_agent.py"]
-    AA --> AC["Anthropic SDK"]
-    AC --> AM["Claude Model config ANTHROPIC_MODEL"]
-    A2 --> AA
-    AA --> T1["Actionability Triage top N"]
-    T1 --> A3["Formatted Articles"]
-    A3 --> AA
-    AA --> SC["Shared context one call"]
-    SC --> P1["Persona aggressive"]
-    SC --> P2["Persona moderate"]
-    SC --> P3["Persona minimal risk"]
-    P1 --> R1["Per story multi profile JSON"]
-    P2 --> R1
-    P3 --> R1
-
-    M --> FR["format_recommendations"]
-    R1 --> FR
-    FR --> O1["Console Output"]
-
-    M --> SR["save_results"]
-    R1 --> SR
-    SR --> J["recommendations timestamp json"]
+    INS[performance_agent.py] --> DB
 ```
 
-## Component Notes
+## Runtime sequence
 
-- `main.py` is the orchestration layer and execution entrypoint (`asyncio.run(main())`).
-- `config.py` centralizes model IDs, API keys, and operational limits (stories count, news age, RSS source).
-- `news_collector.py` handles ingestion/parsing/filtering of Google News RSS entries and optional content fallback scraping.
-- `retrieval_agent.py` now runs in two modes: `headline` (major market movers) and `upside` (non-front-page asymmetric opportunities), each returning 3-5 stories.
-- `analysis_agent.py` triages merged candidates for actionability, then for each selected story: one shared factual `shared_context` call, then three persona briefs (`aggressive`, `moderate`, `minimal_risk`) with separate recommendations and `portfolio_actions`.
-- Results are both human-readable (console) and machine-readable (`recommendations_*.json`).
+1. **Daily:** Collect RSS → headline + upside retrieval → triage → shared context + three personas → validate tickers → `analysis_runs` table (+ optional JSON export).
+2. **Weekly:** For each active portfolio, trader agent reads latest analysis + NAV/positions + rules → `weekly_plans` + `plan_items`.
+3. **Human:** Review plan in UI; accept/reject items; log trades in Sofi; record via `POST /trades`.
+4. **Insights:** `performance_agent` summarizes metrics and decisions.
 
-## Runtime Sequence (Current)
+## Persistence
 
-1. Fetch recent general news (`NewsCollector.get_general_news`).
-2. Run dual retrieval in parallel (`asyncio.gather` on `headline` and `upside` `select_top_stories`).
-3. Merge and deduplicate candidate pools in `main.py`.
-4. Triage candidates for actionability (`AnalysisAgent.select_actionable_stories`).
-5. Analyze selected stories in depth (`AnalysisAgent.analyze_stories_async`: shared context, then three personas via `asyncio.gather` on thread-backed API calls).
-6. Print formatted recommendations.
-7. Save JSON output file with timestamp.
+- Default: `DATABASE_URL=sqlite:///./data/app.db`
+- Docker: bind-mount `./data` (see `docker-compose.yml`)
+
+## Staleness
+
+`GET /plans/current` returns `staleness_banner`, `based_on_analysis_display`, and `is_stale` (>24h since analysis timestamp).

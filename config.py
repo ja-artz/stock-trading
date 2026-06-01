@@ -39,3 +39,15 @@ MAX_NEWS_AGE_HOURS = 24  # Maximum age of news to consider
 VALIDATION_URL_TIMEOUT = 8
 # When ticker checks fail, ask the analysis LLM to rewrite the envelope once
 ENABLE_TICKER_REFINEMENT_LOOP = True
+
+# Persistence
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/app.db")
+DATA_DIR = os.getenv("DATA_DIR", "data")
+EXPORT_DIR = os.getenv("EXPORT_DIR", "data/exports")
+
+# API / household
+HOUSEHOLD_API_KEY = os.getenv("HOUSEHOLD_API_KEY", "")
+HOUSEHOLD_NAME = os.getenv("HOUSEHOLD_NAME", "Our Household")
+MEMBER_1_NAME = os.getenv("MEMBER_1_NAME", "Member 1")
+MEMBER_2_NAME = os.getenv("MEMBER_2_NAME", "Member 2")
+INITIAL_CASH = float(os.getenv("INITIAL_CASH", "1000"))

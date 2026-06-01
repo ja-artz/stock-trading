@@ -1,13 +1,14 @@
 """Main orchestration script for the trading recommendation system."""
 
-import json
 import asyncio
 from datetime import datetime
-import re
-from news_collector import NewsCollector
-from retrieval_agent import RetrievalAgent
-from analysis_agent import AnalysisAgent
+
 import config
+from pipeline.daily_analysis import run_daily_analysis
+from pipeline.utils import dedupe_articles, enrich_selected_articles
+
+# Re-export for backward compatibility
+__all__ = ["dedupe_articles", "enrich_selected_articles", "format_recommendations", "save_results", "main"]
 
 
 def _format_shared_context_block(sc: dict) -> list:
@@ -42,7 +43,10 @@ def _format_profile_brief(profile_id: str, brief: dict) -> list:
         lines.append(f"  Error: {brief.get('error')}")
         return lines
     lines.append(f"  Thesis: {brief.get('thesis', 'N/A')}")
-    lines.append(f"  Risk: {brief.get('risk_level', 'N/A')}/10 | Tier: {brief.get('recommended_tier', 'N/A')} | Return range: {brief.get('expected_return_range', 'N/A')}")
+    lines.append(
+        f"  Risk: {brief.get('risk_level', 'N/A')}/10 | Tier: {brief.get('recommended_tier', 'N/A')} "
+        f"| Return range: {brief.get('expected_return_range', 'N/A')}"
+    )
     milestones = brief.get("key_milestones") or []
     if milestones:
         lines.append("  Milestones:")
@@ -53,9 +57,13 @@ def _format_profile_brief(profile_id: str, brief: dict) -> list:
         lines.append("  Recommendations:")
         for j, rec in enumerate(recs, 1):
             lines.append(f"    {j}. {rec.get('ticker', 'N/A')} {rec.get('instrument_type', 'N/A')}")
-            lines.append(f"       Tier {rec.get('recommended_tier', 'N/A')}, {rec.get('allocation_percent', 'N/A')}")
+            lines.append(
+                f"       Tier {rec.get('recommended_tier', 'N/A')}, {rec.get('allocation_percent', 'N/A')}"
+            )
             lines.append(f"       {rec.get('rationale', 'N/A')}")
-            lines.append(f"       Entry: {rec.get('entry_trigger', 'N/A')} | Exit: {rec.get('exit_trigger', 'N/A')}")
+            lines.append(
+                f"       Entry: {rec.get('entry_trigger', 'N/A')} | Exit: {rec.get('exit_trigger', 'N/A')}"
+            )
             if rec.get("stop_loss"):
                 lines.append(f"       Stop: {rec.get('stop_loss')}")
     else:
@@ -82,7 +90,7 @@ def _format_profile_brief(profile_id: str, brief: dict) -> list:
 
 
 def format_recommendations(analyses: list) -> str:
-    """Format analysis results for display (multi-persona envelope or legacy flat dict)."""
+    """Format analysis results for display."""
     output = []
     output.append("=" * 80)
     output.append("TRADING RECOMMENDATIONS")
@@ -111,211 +119,58 @@ def format_recommendations(analyses: list) -> str:
                 brief = profiles.get(pid, {})
                 output.append("")
                 output.extend(_format_profile_brief(pid, brief))
-            continue
-
-        # Legacy single-profile shape
-        output.append(f"Catalyst Type: {analysis.get('catalyst_type', 'N/A')}")
-        output.append(f"Timeline: {analysis.get('timeline', 'N/A')}")
-        output.append(f"Risk Level: {analysis.get('risk_level', 'N/A')}/10")
-        output.append(f"Recommended Tier: {analysis.get('recommended_tier', 'N/A')}")
-        output.append(f"Expected Return: {analysis.get('expected_return_range', 'N/A')}")
-        output.append(f"\nThesis:")
-        output.append(f"  {analysis.get('thesis', 'N/A')}")
-        affected = analysis.get("affected_companies", [])
-        if affected:
-            output.append(f"\nAffected Companies:")
-            for company in affected:
-                output.append(f"  - {company.get('ticker', 'N/A')} ({company.get('company_name', 'N/A')})")
-                output.append(f"    Impact: {company.get('impact_type', 'N/A')}, Direction: {company.get('expected_direction', 'N/A')}")
-        recommendations = analysis.get("recommendations", [])
-        if recommendations:
-            output.append(f"\nTrading Recommendations:")
-            for j, rec in enumerate(recommendations, 1):
-                output.append(f"\n  {j}. {rec.get('ticker', 'N/A')} - {rec.get('instrument_type', 'N/A')}")
-                output.append(f"     Tier: {rec.get('recommended_tier', 'N/A')}, Allocation: {rec.get('allocation_percent', 'N/A')}")
-                output.append(f"     Rationale: {rec.get('rationale', 'N/A')}")
-                output.append(f"     Entry: {rec.get('entry_trigger', 'N/A')}")
-                output.append(f"     Exit: {rec.get('exit_trigger', 'N/A')}")
-                if rec.get("stop_loss"):
-                    output.append(f"     Stop Loss: {rec.get('stop_loss')}")
-        else:
-            output.append(f"\nNo specific recommendations generated for this story.")
-        risks = analysis.get("risks", [])
-        if risks:
-            output.append(f"\nRisks:")
-            for risk in risks:
-                output.append(f"  - {risk}")
-        milestones = analysis.get("key_milestones", [])
-        if milestones:
-            output.append(f"\nKey Milestones to Watch:")
-            for milestone in milestones:
-                output.append(f"  - {milestone}")
 
     return "\n".join(output)
 
 
 def save_results(analyses: list, filename: str = None):
     """Save analysis results to JSON file."""
+    import json
+    from pathlib import Path
+
     if filename is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"recommendations_{timestamp}.json"
-    
-    with open(filename, 'w') as f:
+        export_dir = Path(config.EXPORT_DIR)
+        export_dir.mkdir(parents=True, exist_ok=True)
+        filename = str(export_dir / f"recommendations_{timestamp}.json")
+
+    with open(filename, "w", encoding="utf-8") as f:
         json.dump(analyses, f, indent=2)
-    
+
     print(f"\nResults saved to: {filename}")
-
-
-def _normalize_text(value: str) -> str:
-    """Normalize text for fuzzy dedupe checks."""
-    cleaned = re.sub(r"\s+", " ", (value or "").strip().lower())
-    return re.sub(r"[^a-z0-9 ]", "", cleaned)
-
-
-def dedupe_articles(articles: list) -> list:
-    """Deduplicate stories by link first, then normalized title."""
-    seen_links = set()
-    seen_titles = set()
-    deduped = []
-    for article in articles:
-        link_key = (article.get("link") or "").strip().lower()
-        title_key = _normalize_text(article.get("title", ""))
-        if link_key and link_key in seen_links:
-            continue
-        if title_key and title_key in seen_titles:
-            continue
-        if link_key:
-            seen_links.add(link_key)
-        if title_key:
-            seen_titles.add(title_key)
-        deduped.append(article)
-    return deduped
-
-
-def enrich_selected_articles(selected_articles: list, all_articles: list) -> list:
-    """Rehydrate selected stories with original link/published fields when possible."""
-    original_by_title = {_normalize_text(a.get("title", "")): a for a in all_articles}
-    enriched = []
-    for article in selected_articles:
-        original = original_by_title.get(_normalize_text(article.get("title", "")))
-        if original:
-            enriched.append({
-                "title": article.get("title", original.get("title", "")),
-                "source": article.get("source", original.get("source", "Unknown")),
-                "summary": article.get("summary", original.get("summary", "")),
-                "published": original.get("published", "Unknown"),
-                "link": original.get("link", ""),
-                "retrieval_type": article.get("retrieval_type", "unknown")
-            })
-        else:
-            enriched.append({
-                "title": article.get("title", ""),
-                "source": article.get("source", "Unknown"),
-                "summary": article.get("summary", ""),
-                "published": article.get("published", "Unknown"),
-                "link": article.get("link", ""),
-                "retrieval_type": article.get("retrieval_type", "unknown")
-            })
-    return enriched
+    return filename
 
 
 async def main():
     """Main execution function."""
+    from core.store import init_database
+
     print("=" * 80)
-    print("STOCK TRADING RECOMMENDATION SYSTEM - MVP")
+    print("STOCK TRADING RECOMMENDATION SYSTEM")
     print("=" * 80)
     print()
-    
-    # Step 1: Collect news (optional - can also let retrieval agent fetch directly)
-    print("Step 1: Collecting news...")
-    collector = NewsCollector(
-        rss_url=config.GOOGLE_NEWS_RSS_URL,
-        max_age_hours=config.MAX_NEWS_AGE_HOURS
-    )
-    
-    articles = collector.get_general_news(num_results=config.NEWS_FETCH_POOL_SIZE)
-    print(f"Collected {len(articles)} news articles (target: {config.NEWS_FETCH_POOL_SIZE})")
-    
-    if not articles:
-        print("No articles found. Exiting.")
-        return
-    
-    # Step 2: Select candidate stories using dual retrieval agents
-    print("\nStep 2: Running dual retrieval agents...")
-    retrieval_agent = RetrievalAgent()
 
-    headline_result, upside_result = await asyncio.gather(
-        retrieval_agent.select_top_stories(
-            mode="headline",
-            news_articles=articles,
-            min_stories=config.RETRIEVAL_MIN_STORIES_PER_AGENT,
-            max_stories=config.RETRIEVAL_MAX_STORIES_PER_AGENT,
-        ),
-        retrieval_agent.select_top_stories(
-            mode="upside",
-            news_articles=articles,
-            min_stories=config.RETRIEVAL_MIN_STORIES_PER_AGENT,
-            max_stories=config.RETRIEVAL_MAX_STORIES_PER_AGENT,
-        ),
-    )
+    init_database()
 
-    headline_articles = [
-        {**article, "retrieval_type": "headline"}
-        for article in headline_result.get("articles", [])
-    ]
-    upside_articles = [
-        {**article, "retrieval_type": "upside"}
-        for article in upside_result.get("articles", [])
-    ]
-    merged_candidates = dedupe_articles(headline_articles + upside_articles)
+    print("Running daily analysis pipeline...")
+    result = await run_daily_analysis(persist=True, export=True, run_type="daily")
 
-    if headline_result.get("reasoning"):
-        print(f"\nHeadline Retrieval Reasoning: {headline_result['reasoning']}")
-    if upside_result.get("reasoning"):
-        print(f"\nUpside Retrieval Reasoning: {upside_result['reasoning']}")
+    print(f"Collected pool -> {result.article_count} articles, {result.story_count} stories analyzed")
+    if result.analysis_run_id:
+        print(f"Persisted analysis_run_id={result.analysis_run_id}")
 
-    print(
-        f"Headline candidates: {len(headline_articles)}, "
-        f"Upside candidates: {len(upside_articles)}, "
-        f"Merged unique candidates: {len(merged_candidates)}"
-    )
-
-    if not merged_candidates:
-        print("No candidate articles selected. Exiting.")
+    if not result.analyses:
+        print("No analyses produced. Exiting.")
         return
 
-    # Step 3: Triage and analyze selected stories
-    analysis_agent = AnalysisAgent()
-    triage = analysis_agent.select_actionable_stories(
-        merged_candidates,
-        max_stories=config.ACTIONABLE_STORIES_TO_ANALYZE
-    )
-    selected_actionable = triage.get("articles", [])
-    print(f"\nTriage Reasoning: {triage.get('reasoning', '')}")
-    print(f"Selected {len(selected_actionable)} actionable stories for full analysis")
-
-    if not selected_actionable:
-        print("No actionable stories selected. Exiting.")
-        return
-
-    formatted_articles = enrich_selected_articles(selected_actionable, articles)
-    print(f"\nStep 3: Analyzing {len(formatted_articles)} selected stories...")
-    analyses = await analysis_agent.analyze_stories_async(formatted_articles)
-    print("\nValidating stories and tickers; refining recommendations if needed...")
-    analyses = await analysis_agent.validate_and_refine_envelopes_async(
-        formatted_articles, analyses
-    )
-
-    # Step 4: Display results
     print("\n" + "=" * 80)
     print("RESULTS")
     print("=" * 80)
-    formatted_output = format_recommendations(analyses)
-    print(formatted_output)
-    
-    # Step 5: Save results
-    save_results(analyses)
-    
+    print(format_recommendations(result.analyses))
+
+    if result.export_path:
+        print(f"\nExport: {result.export_path}")
+
     print("\n" + "=" * 80)
     print("Analysis complete!")
     print("=" * 80)
