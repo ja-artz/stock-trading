@@ -96,6 +96,10 @@ export type PlanItem = {
   instrument_type: string | null;
   execution_status?: "pending" | "executed" | null;
   horizon: string | null;
+  capital_tier?: number | null;
+  conviction_grade?: string | null;
+  sector?: string | null;
+  theme_tag?: string | null;
   size_hint: string | null;
   suggested_notional_usd?: number | null;
   suggested_quantity?: number | null;
@@ -122,6 +126,52 @@ export type PlanItem = {
   } | null;
 };
 
+export type ActionItem = {
+  id: number;
+  portfolio_id: number;
+  position_lot_id?: number | null;
+  ticker?: string;
+  priority: string;
+  action: string;
+  reason_code: string;
+  status: string;
+  detail?: Record<string, unknown>;
+  override_note?: string | null;
+  generated_at?: string;
+};
+
+export type TierDefinition = {
+  id: number;
+  slug: string;
+  name: string;
+  hint: string;
+  budget_pct: number;
+  max_positions: number;
+  deployable: boolean;
+  expected_horizon?: string | null;
+  summary: string;
+};
+
+export type DisciplineSummary = {
+  tier_catalog?: TierDefinition[];
+  tier_state: Record<
+    string,
+    {
+      id?: number;
+      name?: string;
+      hint?: string;
+      budget_usd: number;
+      deployed_usd: number;
+      available_usd: number;
+      position_count: number;
+      max_positions: number;
+    }
+  >;
+  open_action_items: ActionItem[];
+  unmapped_positions: Position[];
+  over_capacity_tiers: number[];
+};
+
 export type TradingPlanResponse = {
   plan: {
     id: number;
@@ -143,3 +193,53 @@ export type TradingPlanResponse = {
 
 /** @deprecated Use TradingPlanResponse */
 export type WeeklyPlanResponse = TradingPlanResponse;
+
+export type ChatThread = {
+  id: number;
+  household_id: number;
+  portfolio_id: number;
+  weekly_plan_id?: number | null;
+  title?: string | null;
+  focus?: Record<string, unknown> | null;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type ChatMessage = {
+  id: number;
+  thread_id: number;
+  role: string;
+  content: string;
+  metadata?: {
+    plan_revision?: PlanRevision;
+    plan_revision_preview?: PlanRevisionPreview;
+  };
+  created_at?: string;
+};
+
+export type PlanRevision = {
+  intent: string;
+  summary?: string;
+  changes: Array<{
+    op: string;
+    plan_item_id?: number;
+    patch?: Record<string, unknown>;
+    item?: Record<string, unknown>;
+    reason?: string;
+  }>;
+};
+
+export type PlanRevisionPreview = {
+  weekly_plan_id: number;
+  summary?: string;
+  before?: unknown[];
+  after?: Array<{
+    op: string;
+    plan_item_id?: number;
+    item?: PlanItem & Record<string, unknown>;
+    removed?: boolean;
+  }>;
+  errors?: string[];
+  warnings?: string[];
+  ok: boolean;
+};

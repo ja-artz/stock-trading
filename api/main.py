@@ -25,7 +25,16 @@ from core.rules import DEFAULT_RULES, parse_rules
 from core.snapshots import get_latest_snapshot
 from performance_agent import PerformanceAgent
 from pipeline.daily_analysis import run_daily_analysis
+from core.plan_revision import apply_plan_revision, preview_plan_revision
+from core.trader_context import build_trader_context
+from core.tier_discipline import (
+    get_discipline_summary,
+    run_daily_discipline,
+    update_action_item_status,
+)
+from core.position_lots import backfill_lot_from_holding
 from trader_agent import TraderAgent
+from trader_chat_agent import TraderChatAgent
 
 app = FastAPI(title="Stock Trading Platform", version="0.2.0")
 app.add_middleware(
@@ -119,6 +128,25 @@ class FreshStartRequest(BaseModel):
 
 class ClearRecommendationsRequest(BaseModel):
     portfolio_id: int = 1
+
+
+class ChatThreadCreate(BaseModel):
+    portfolio_id: int = 1
+    weekly_plan_id: Optional[int] = None
+    title: Optional[str] = None
+    focus: Optional[dict] = None
+
+
+class ChatMessageCreate(BaseModel):
+    content: str
+    focus: Optional[dict] = None
+
+
+class PlanRevisionBody(BaseModel):
+    portfolio_id: int = 1
+    weekly_plan_id: int
+    revision: dict
+    thread_id: Optional[int] = None
 
 
 def _default_portfolio_id() -> int:
@@ -393,6 +421,65 @@ def post_trade(body: TradeRequest):
     return result
 
 
+class AssignLotTierRequest(BaseModel):
+    portfolio_id: int = 1
+    ticker: str
+    instrument_type: str = "stock"
+    capital_tier: int
+    entry_date: Optional[str] = None
+    entry_price: Optional[float] = None
+    sector: Optional[str] = None
+
+
+class ActionItemStatusRequest(BaseModel):
+    portfolio_id: int = 1
+    status: str
+    override_note: Optional[str] = None
+
+
+@app.get("/portfolio/discipline")
+def get_portfolio_discipline(portfolio_id: Optional[int] = None):
+    pid = portfolio_id or _default_portfolio_id()
+    return get_discipline_summary(pid)
+
+
+@app.post("/runs/discipline", dependencies=[Depends(require_api_key)])
+def run_discipline_check(portfolio_id: Optional[int] = None):
+    pid = portfolio_id or _default_portfolio_id()
+    items = run_daily_discipline(pid)
+    return {"ok": True, "portfolio_id": pid, "generated_count": len(items), "items": items}
+
+
+@app.post("/portfolio/discipline/items/{item_id}/status", dependencies=[Depends(require_api_key)])
+def set_discipline_item_status(item_id: int, body: ActionItemStatusRequest):
+    try:
+        return update_action_item_status(
+            item_id,
+            body.portfolio_id,
+            body.status,
+            override_note=body.override_note,
+        )
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e)) from e
+
+
+@app.post("/portfolio/positions/assign-tier", dependencies=[Depends(require_api_key)])
+def assign_position_tier(body: AssignLotTierRequest):
+    try:
+        lot_id = backfill_lot_from_holding(
+            body.portfolio_id,
+            body.ticker,
+            body.instrument_type,
+            body.capital_tier,
+            entry_date=body.entry_date,
+            entry_price=body.entry_price,
+            sector=body.sector,
+        )
+        return {"ok": True, "position_lot_id": lot_id}
+    except ValueError as e:
+        raise HTTPException(400, detail=str(e)) from e
+
+
 @app.get("/portfolio")
 def get_portfolio(portfolio_id: Optional[int] = None):
     pid = portfolio_id or _default_portfolio_id()
@@ -411,9 +498,11 @@ def get_portfolio(portfolio_id: Optional[int] = None):
         ).fetchone()
         trade_count = int(row["c"] or 0)
     state = enrich_nav_state(compute_nav(pid))
+    discipline = get_discipline_summary(pid)
     return {
         "portfolio": port,
         "state": state,
+        "discipline": discipline,
         "initial_cash": float(port["initial_cash"]) if port else None,
         "trade_count": trade_count,
         "is_cash_only": trade_count == 0 and len(state.get("positions", [])) == 0,
@@ -521,3 +610,111 @@ def latest_insights(portfolio_id: Optional[int] = None):
     pid = portfolio_id or _default_portfolio_id()
     report = store.get_latest_insight(1, pid)
     return {"report": report}
+
+
+@app.post("/chat/threads")
+def create_chat_thread(body: ChatThreadCreate):
+    session = store.get_active_session()
+    if not session:
+        raise HTTPException(503, "No active session")
+    pid = body.portfolio_id
+    plan_id = body.weekly_plan_id
+    if not plan_id:
+        plan = store.get_current_weekly_plan(pid)
+        if plan:
+            plan_id = int(plan["id"])
+    thread_id = store.create_chat_thread(
+        int(session["household_id"]),
+        pid,
+        weekly_plan_id=plan_id,
+        title=body.title,
+        focus=body.focus,
+    )
+    thread = store.get_chat_thread(thread_id, pid)
+    focus_preview = None
+    if body.focus:
+        try:
+            ctx = build_trader_context(
+                pid,
+                weekly_plan_id=plan_id,
+                focus=body.focus,
+                fetch_quotes=False,
+            )
+            focus_preview = {
+                "focus": body.focus,
+                "focused_plan_item": ctx.get("focused_plan_item"),
+                "focused_story": ctx.get("focused_story"),
+            }
+        except Exception as exc:
+            focus_preview = {"focus": body.focus, "error": str(exc)}
+    return {"thread": thread, "focus_preview": focus_preview}
+
+
+@app.get("/chat/threads")
+def list_chat_threads(portfolio_id: Optional[int] = None, limit: int = 20):
+    pid = portfolio_id or _default_portfolio_id()
+    return {"threads": store.list_chat_threads(pid, limit=limit)}
+
+
+@app.get("/chat/threads/{thread_id}/messages")
+def get_chat_messages(thread_id: int, portfolio_id: Optional[int] = None):
+    pid = portfolio_id or _default_portfolio_id()
+    thread = store.get_chat_thread(thread_id, pid)
+    if not thread:
+        raise HTTPException(404, "Thread not found")
+    return {"thread": thread, "messages": store.get_chat_messages(thread_id)}
+
+
+@app.post("/chat/threads/{thread_id}/messages")
+async def post_chat_message(
+    thread_id: int,
+    body: ChatMessageCreate,
+    portfolio_id: Optional[int] = None,
+):
+    pid = portfolio_id or _default_portfolio_id()
+    if not (body.content or "").strip():
+        raise HTTPException(400, "content required")
+    agent = TraderChatAgent()
+
+    def _run():
+        return agent.reply(
+            thread_id,
+            body.content.strip(),
+            portfolio_id=pid,
+            focus=body.focus,
+        )
+
+    try:
+        result = await asyncio.to_thread(_run)
+    except ValueError as e:
+        raise HTTPException(404, detail=str(e)) from e
+    except Exception as e:
+        raise HTTPException(500, detail=str(e)) from e
+    return result
+
+
+@app.post("/chat/plan-revisions/preview")
+def preview_revision(body: PlanRevisionBody):
+    ctx = build_trader_context(body.portfolio_id, weekly_plan_id=body.weekly_plan_id, fetch_quotes=True)
+    preview = preview_plan_revision(
+        body.portfolio_id,
+        body.weekly_plan_id,
+        body.revision,
+        quote_bundle=ctx.get("market_quotes"),
+    )
+    return preview
+
+
+@app.post("/chat/plan-revisions/apply", dependencies=[Depends(require_api_key)])
+def apply_revision(body: PlanRevisionBody):
+    ctx = build_trader_context(body.portfolio_id, weekly_plan_id=body.weekly_plan_id, fetch_quotes=True)
+    result = apply_plan_revision(
+        body.portfolio_id,
+        body.weekly_plan_id,
+        body.revision,
+        thread_id=body.thread_id,
+        quote_bundle=ctx.get("market_quotes"),
+    )
+    if not result.get("ok"):
+        raise HTTPException(400, detail=result)
+    return result

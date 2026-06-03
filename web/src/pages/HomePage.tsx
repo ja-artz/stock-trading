@@ -7,7 +7,8 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { RunProgressPanel } from "@/components/RunProgressPanel";
 import { useDailyRun } from "@/hooks/useDailyRun";
 import { useTradingPlanRun } from "@/hooks/useTradingPlanRun";
-import { Play, Calendar, Newspaper, Briefcase, AlertCircle } from "lucide-react";
+import { Play, Calendar, Newspaper, Briefcase, AlertCircle, MessageSquare } from "lucide-react";
+import { useChatContext } from "@/context/ChatContext";
 
 export function HomePage() {
   const [data, setData] = useState<Dashboard | null>(null);
@@ -15,6 +16,7 @@ export function HomePage() {
   const [busy, setBusy] = useState("");
   const dailyRun = useDailyRun();
   const planRun = useTradingPlanRun();
+  const { openChat } = useChatContext();
 
   const load = useCallback(() => {
     api.get<Dashboard>("/dashboard").then(setData).catch((e) => setError(String(e)));
@@ -64,6 +66,10 @@ export function HomePage() {
           >
             <Calendar className="w-4 h-4 mr-2" />
             {planRun.busy ? "Generating…" : "Generate trading plan"}
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => openChat({ focus: { type: "dashboard" } })}>
+            <MessageSquare className="w-4 h-4 mr-2" />
+            Chat with trader
           </Button>
         </div>
       </div>

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import { api } from "@/api/client";
+import { api, type ActionItem, type DisciplineSummary } from "@/api/client";
+import { TierLegendBlock } from "@/components/TierBadge";
+import { getTierDefinition } from "@/lib/tierLabels";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
@@ -30,7 +32,8 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { TickerDisplay } from "@/components/TickerDisplay";
-import { Plus } from "lucide-react";
+import { MessageSquare, Plus } from "lucide-react";
+import { useChatContext } from "@/context/ChatContext";
 
 type Position = {
   ticker: string;
@@ -53,11 +56,13 @@ type PortfolioState = {
     invested_usd: number;
     positions: Position[];
   };
+  discipline?: DisciplineSummary;
 };
 
 export function PortfolioPage() {
   const [data, setData] = useState<PortfolioState | null>(null);
   const [error, setError] = useState("");
+  const { openChat } = useChatContext();
 
   const load = useCallback(() => {
     api
@@ -73,7 +78,7 @@ export function PortfolioPage() {
   if (error) return <p className="text-red-600">{error}</p>;
   if (!data) return <p className="text-gray-600">Loading…</p>;
 
-  const { state } = data;
+  const { state, discipline } = data;
 
   return (
     <div className="space-y-6">
@@ -82,7 +87,13 @@ export function PortfolioPage() {
           <h1 className="text-3xl font-bold">Portfolio</h1>
           <p className="text-gray-600 mt-1">{data.portfolio.name} · log trades from Sofi</p>
         </div>
-        <LogTradeDialog portfolioId={data.portfolio.id} onSaved={load} />
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => openChat({ focus: { type: "portfolio" } })}>
+            <MessageSquare className="w-4 h-4 mr-2" />
+            Discuss book
+          </Button>
+          <LogTradeDialog portfolioId={data.portfolio.id} onSaved={load} />
+        </div>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -91,6 +102,14 @@ export function PortfolioPage() {
         <MetricCard label="Invested" value={`$${state.invested_usd.toFixed(2)}`} />
         <MetricCard label="Positions" value={String(state.positions.length)} />
       </div>
+
+      {discipline && (
+        <DisciplinePanel
+          portfolioId={data.portfolio.id}
+          discipline={discipline}
+          onUpdated={load}
+        />
+      )}
 
       <Card>
         <CardHeader>
@@ -418,5 +437,173 @@ function LogTradeDialog({ portfolioId, onSaved }: { portfolioId: number; onSaved
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+const PRIORITY_STYLES: Record<string, string> = {
+  critical: "bg-red-100 text-red-800 border-red-200",
+  high: "bg-amber-100 text-amber-900 border-amber-200",
+  medium: "bg-slate-100 text-slate-800 border-slate-200",
+};
+
+function DisciplinePanel({
+  portfolioId,
+  discipline,
+  onUpdated,
+}: {
+  portfolioId: number;
+  discipline: DisciplineSummary;
+  onUpdated: () => void;
+}) {
+  const [overrideId, setOverrideId] = useState<number | null>(null);
+  const [overrideNote, setOverrideNote] = useState("");
+  const [err, setErr] = useState("");
+
+  const runCheck = () => {
+    api
+      .post(`/runs/discipline?portfolio_id=${portfolioId}`)
+      .then(() => onUpdated())
+      .catch((e) => setErr(String(e)));
+  };
+
+  const setStatus = (item: ActionItem, status: string) => {
+    const body: { portfolio_id: number; status: string; override_note?: string } = {
+      portfolio_id,
+      status,
+    };
+    if (status === "overridden") body.override_note = overrideNote;
+    api
+      .post(`/portfolio/discipline/items/${item.id}/status`, body)
+      .then(() => {
+        setOverrideId(null);
+        setOverrideNote("");
+        onUpdated();
+      })
+      .catch((e) => setErr(String(e)));
+  };
+
+  const assignTier = (p: Position, tier: number) => {
+    api
+      .post("/portfolio/positions/assign-tier", {
+        portfolio_id: portfolioId,
+        ticker: p.ticker,
+        instrument_type: p.instrument_type,
+        capital_tier: tier,
+      })
+      .then(() => onUpdated())
+      .catch((e) => setErr(String(e)));
+  };
+
+  const items = discipline.open_action_items || [];
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between">
+        <CardTitle>Tier discipline</CardTitle>
+        <Button variant="outline" size="sm" onClick={runCheck}>
+          Run daily check
+        </Button>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {err && <p className="text-sm text-red-600">{err}</p>}
+        <TierLegendBlock catalog={discipline.tier_catalog} />
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+          {Object.entries(discipline.tier_state || {}).map(([tier, b]) => {
+            const def = getTierDefinition(Number(tier)) ?? (b.name ? { name: b.name, hint: b.hint ?? "" } : null);
+            return (
+              <div key={tier} className="rounded border p-3">
+                <p className="font-medium">
+                  {def?.name ?? `Tier ${tier}`}
+                  <span className="text-gray-500 font-normal"> (T{tier})</span>
+                </p>
+                {def?.hint && <p className="text-xs text-gray-500 mt-0.5">{def.hint}</p>}
+                <p className="text-gray-600 mt-1">
+                  {b.position_count}/{b.max_positions} positions · ${b.deployed_usd.toFixed(0)} / $
+                  {b.budget_usd.toFixed(0)}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+        {discipline.unmapped_positions?.length > 0 && (
+          <div className="rounded border border-amber-200 bg-amber-50 p-3 text-sm">
+            <p className="font-medium mb-2">Unmapped positions (assign tier)</p>
+            {discipline.unmapped_positions.map((p) => (
+              <div key={`${p.ticker}-${p.instrument_type}`} className="flex items-center gap-2 py-1">
+                <TickerDisplay symbol={p.ticker} companyName={p.company_name} />
+                {[1, 2, 3].map((t) => {
+                  const def = getTierDefinition(t);
+                  return (
+                    <Button
+                      key={t}
+                      size="sm"
+                      variant="outline"
+                      title={def?.summary}
+                      onClick={() => assignTier(p, t)}
+                    >
+                      {def?.name ?? `T${t}`}
+                    </Button>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        )}
+        {items.length === 0 ? (
+          <p className="text-gray-600 text-sm">No open discipline actions.</p>
+        ) : (
+          <ul className="space-y-2">
+            {items.map((item) => (
+              <li
+                key={item.id}
+                className={`rounded border p-3 text-sm ${PRIORITY_STYLES[item.priority] || PRIORITY_STYLES.medium}`}
+              >
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <span className="font-medium uppercase text-xs">{item.priority}</span>
+                    <p className="font-medium">
+                      {(item.detail?.ticker as string) || item.ticker || "—"} · {item.action.replace(/_/g, " ")}
+                    </p>
+                    <p className="text-gray-700">{item.reason_code.replace(/_/g, " ")}</p>
+                    {item.detail?.pl_pct != null && (
+                      <p className="text-gray-600">
+                        P/L {Number(item.detail.pl_pct).toFixed(1)}% · held {String(item.detail.days_held)}d
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex gap-1">
+                    <Button size="sm" variant="outline" onClick={() => setStatus(item, "acknowledged")}>
+                      Ack
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setStatus(item, "executed")}>
+                      Done
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setOverrideId(item.id)}>
+                      Override
+                    </Button>
+                  </div>
+                </div>
+                {overrideId === item.id && (
+                  <div className="mt-2 flex gap-2">
+                    <Input
+                      placeholder="Why override? (required)"
+                      value={overrideNote}
+                      onChange={(e) => setOverrideNote(e.target.value)}
+                    />
+                    <Button
+                      size="sm"
+                      disabled={!overrideNote.trim()}
+                      onClick={() => setStatus(item, "overridden")}
+                    >
+                      Save override
+                    </Button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
   );
 }

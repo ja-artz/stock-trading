@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from core.db import db_session
 from core.portfolio import compute_nav, is_new_position
+from core.position_lots import create_lot_from_buy, reduce_lot_on_sell
 from core.rules import has_blocking_violations, validate_trade
 from core import store
 from core.snapshots import save_snapshot
@@ -80,6 +81,8 @@ def log_trade(
         price=price,
         new_positions_this_week=new_week,
         is_new_position=is_new and side.lower() == "buy",
+        portfolio_id=portfolio_id,
+        plan_item_id=plan_item_id,
     )
 
     if block_on_violations and has_blocking_violations(violations):
@@ -117,6 +120,23 @@ def log_trade(
             ),
         )
         event_id = int(cur.lastrowid)
+
+    side_l = side.lower()
+    if side_l == "buy":
+        create_lot_from_buy(
+            portfolio_id,
+            event_id,
+            ticker=ticker,
+            instrument_type=instrument_type,
+            quantity=quantity,
+            price=price,
+            plan_item_id=plan_item_id,
+            expiry=expiry,
+        )
+    elif side_l == "sell":
+        reduce_lot_on_sell(portfolio_id, ticker, instrument_type, quantity)
+
+    with db_session() as conn:
         port = conn.execute("SELECT session_id FROM portfolios WHERE id = ?", (portfolio_id,)).fetchone()
         session = conn.execute(
             "SELECT household_id FROM sessions WHERE id = ?",

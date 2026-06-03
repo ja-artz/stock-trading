@@ -12,7 +12,7 @@ from core.instruments import is_option_instrument_type, trade_notional
 
 DEFAULT_RULES: dict[str, Any] = {
     "max_position_pct_nav": 33,
-    "max_new_positions_per_week": 5,
+    "max_new_positions_per_week": 10,
     "cash_floor_pct": 10,
     "max_open_option_positions": 2,
     "options_allowed": True,
@@ -21,6 +21,19 @@ DEFAULT_RULES: dict[str, Any] = {
     "weekly_plan_day": "Sunday",
     "weekly_plan_hour_local": 18,
     "timezone": "America/Los_Angeles",
+    "tier_1_pct": 15,
+    "tier_2_pct": 55,
+    "tier_3_pct": 25,
+    "dry_powder_pct": 5,
+    "tier_1_max_positions": 2,
+    "tier_2_max_positions": 3,
+    "tier_3_max_positions": 2,
+    "tier_1_max_new_trades_per_month": 2,
+    "max_sector_pct_nav": 40,
+    "max_theme_pct_nav": 50,
+    "max_portfolio_options_pct": 30,
+    "tier_2_max_options_pct": 40,
+    "tier_3_max_options_pct": 20,
 }
 
 
@@ -59,6 +72,82 @@ def pacific_week_start(dt: datetime) -> datetime:
     return datetime.combine(monday, datetime.min.time(), tzinfo=tz)
 
 
+def _tier_entry_violations(
+    rules: dict[str, Any],
+    *,
+    portfolio_id: int,
+    plan_item_id: Optional[int],
+    ticker: str,
+    instrument_type: str,
+    notional: float,
+    is_new_position: bool,
+) -> List[RuleViolation]:
+    from core.position_lots import count_tier1_opens_this_month, enrich_lots_with_marks, get_open_lots
+    from core.tier_engine import ProposedEntry, build_tier_state, validate_proposed_entry
+    from core.tier_config import normalize_capital_tier
+
+    lots = enrich_lots_with_marks(portfolio_id, get_open_lots(portfolio_id))
+    nav_state = None
+    try:
+        from core.portfolio import compute_nav
+
+        nav_state = compute_nav(portfolio_id)
+    except Exception:
+        return []
+
+    state = build_tier_state(
+        nav_usd=nav_state["nav_usd"],
+        cash_usd=nav_state["cash_usd"],
+        lots=lots,
+        rules=rules,
+        tier_1_trades_this_month=count_tier1_opens_this_month(portfolio_id),
+    )
+
+    tier = 2
+    sector = None
+    theme = None
+    corr = ticker.upper()
+    conviction = None
+    consensus = None
+    if plan_item_id:
+        from core.plan_execution import get_plan_item
+
+        item = get_plan_item(plan_item_id)
+        if item:
+            tier = normalize_capital_tier(item.get("capital_tier")) or tier
+            sector = item.get("sector")
+            theme = item.get("theme_tag")
+            corr = item.get("correlation_group") or ticker.upper()
+            conviction = item.get("conviction_grade")
+            consensus = item.get("persona_consensus")
+
+    existing = any(
+        l["ticker"].upper() == ticker.upper()
+        and (l.get("instrument_type") or "stock") == instrument_type
+        for l in lots
+    )
+
+    proposed = ProposedEntry(
+        capital_tier=tier,
+        ticker=ticker.upper(),
+        instrument_type=instrument_type,
+        notional_usd=notional,
+        sector=sector,
+        theme_tag=theme,
+        correlation_group=corr,
+        conviction_grade=conviction,
+        persona_consensus=consensus,
+        is_new_lot=is_new_position,
+    )
+    ok, viols = validate_proposed_entry(
+        proposed, state, rules, existing_lot_for_ticker=existing
+    )
+    out: List[RuleViolation] = []
+    for v in viols:
+        out.append(RuleViolation(v["code"], v["message"], v.get("severity", "error")))
+    return out
+
+
 def validate_trade(
     rules: dict[str, Any],
     *,
@@ -72,6 +161,8 @@ def validate_trade(
     price: float,
     new_positions_this_week: int,
     is_new_position: bool,
+    portfolio_id: Optional[int] = None,
+    plan_item_id: Optional[int] = None,
 ) -> List[RuleViolation]:
     violations: List[RuleViolation] = []
     side_l = side.lower()
@@ -135,7 +226,20 @@ def validate_trade(
                 RuleViolation(
                     "max_position_pct",
                     f"Position would exceed {max_pos_pct}% of NAV (~${max_pos_value:.2f}).",
-                    severity="warning",
+                    severity="error",
+                )
+            )
+
+        if portfolio_id is not None:
+            violations.extend(
+                _tier_entry_violations(
+                    rules,
+                    portfolio_id=portfolio_id,
+                    plan_item_id=plan_item_id,
+                    ticker=ticker,
+                    instrument_type=instrument_type,
+                    notional=notional,
+                    is_new_position=is_new_position,
                 )
             )
 

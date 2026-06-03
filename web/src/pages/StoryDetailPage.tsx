@@ -7,7 +7,9 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { TickerDisplay } from "@/components/TickerDisplay";
-import { ArrowLeft, ExternalLink, Flame, Target, Shield } from "lucide-react";
+import { ArrowLeft, ExternalLink, Flame, Target, Shield, MessageSquare } from "lucide-react";
+import { useChatContext } from "@/context/ChatContext";
+import { tierShortLabel } from "@/lib/tierLabels";
 
 const PERSONAS = [
   { id: "aggressive", label: "Aggressive", icon: Flame },
@@ -18,10 +20,13 @@ const PERSONAS = [
 export function StoryDetailPage() {
   const { index } = useParams();
   const [story, setStory] = useState<StoryEnvelope | null>(null);
+  const [runId, setRunId] = useState<number | undefined>();
+  const { openChat } = useChatContext();
 
   useEffect(() => {
     const i = Number(index);
-    api.get<{ stories: StoryEnvelope[] }>("/stories").then((r) => {
+    api.get<{ stories: StoryEnvelope[]; run_id?: number }>("/stories").then((r) => {
+      if (r.run_id) setRunId(r.run_id);
       if (!Number.isNaN(i) && r.stories[i]) setStory(r.stories[i]);
     });
   }, [index]);
@@ -36,12 +41,26 @@ export function StoryDetailPage() {
 
   return (
     <div className="space-y-6">
-      <Link to="/stories">
-        <Button variant="ghost" size="sm">
-          <ArrowLeft className="w-4 h-4 mr-2" />
-          Back to Stories
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Link to="/stories">
+          <Button variant="ghost" size="sm">
+            <ArrowLeft className="w-4 h-4 mr-2" />
+            Back to Stories
+          </Button>
+        </Link>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            openChat({
+              focus: { type: "story", story_index: Number(index), run_id: runId },
+            })
+          }
+        >
+          <MessageSquare className="w-4 h-4 mr-2" />
+          Discuss with trader agent
         </Button>
-      </Link>
+      </div>
 
       <Card>
         <CardHeader>
@@ -182,7 +201,13 @@ export function StoryDetailPage() {
                       </Alert>
                       <div className="grid grid-cols-2 gap-4 text-sm">
                         <div>
-                          Risk: {String(brief?.risk_level)}/10 · Tier: {String(brief?.recommended_tier)}
+                          Risk: {String(brief?.risk_level)}/10 · Suggested tier:{" "}
+                          {tierShortLabel(
+                            typeof brief?.recommended_tier === "number"
+                              ? brief.recommended_tier
+                              : Number(brief?.recommended_tier) || null,
+                            true
+                          )}
                         </div>
                         <div>Return range: {String(brief?.expected_return_range || "—")}</div>
                       </div>

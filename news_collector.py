@@ -2,8 +2,8 @@
 
 import feedparser
 import requests
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from datetime import date, datetime, timedelta
+from typing import List, Dict, Optional, Union
 from bs4 import BeautifulSoup
 from urllib.parse import quote
 import time
@@ -23,7 +23,54 @@ class NewsCollector:
         self.rss_url = rss_url
         self.max_age_hours = max_age_hours
     
-    def fetch_news(self, query: Optional[str] = None, num_results: int = 20) -> List[Dict]:
+    def fetch_news_for_date(
+        self,
+        as_of_date: Union[date, datetime],
+        *,
+        query: Optional[str] = None,
+        num_results: int = 30,
+    ) -> List[Dict]:
+        """
+        Fetch Google News articles published on a specific calendar day (US search).
+
+        Uses after:/before: day bounds (exclusive end). Suitable for backtests; no max-age filter.
+
+        When query is None or empty, uses date-only search (broad/general headlines for that day).
+        The live app uses get_general_news() (top-stories RSS) instead; Google does not expose
+        that feed for arbitrary past dates, so backtests must use search + after/before.
+        """
+        if isinstance(as_of_date, datetime):
+            day = as_of_date.date()
+        else:
+            day = as_of_date
+        next_day = day + timedelta(days=1)
+        bounds = f"after:{day.isoformat()} before:{next_day.isoformat()}"
+        q = (query or "").strip()
+        dated_query = f"{q} {bounds}".strip() if q else bounds
+        articles = self.fetch_news(
+            query=dated_query,
+            num_results=num_results,
+            reference_time=datetime.combine(next_day, datetime.min.time()),
+            max_age_hours_override=0,
+        )
+        # Google News search with only after/before often returns nothing; broad fallback.
+        if not articles and not q:
+            articles = self.fetch_news(
+                query=f"news {bounds}",
+                num_results=num_results,
+                reference_time=datetime.combine(next_day, datetime.min.time()),
+                max_age_hours_override=0,
+            )
+        return articles
+
+    def fetch_news(
+        self,
+        query: Optional[str] = None,
+        num_results: int = 20,
+        *,
+        reference_time: Optional[datetime] = None,
+        max_age_hours_override: Optional[int] = None,
+    ) -> List[Dict]:
         """
         Fetch news articles from Google News.
         
@@ -48,7 +95,13 @@ class NewsCollector:
             feed = feedparser.parse(rss_url)
             
             articles = []
-            cutoff_time = datetime.now() - timedelta(hours=self.max_age_hours)
+            max_age = (
+                self.max_age_hours
+                if max_age_hours_override is None
+                else max_age_hours_override
+            )
+            ref = reference_time or datetime.now()
+            cutoff_time = ref - timedelta(hours=max_age) if max_age > 0 else None
             
             for entry in feed.entries[:num_results]:
                 # Parse published date
@@ -63,7 +116,7 @@ class NewsCollector:
                     continue
                 
                 # Filter by age if max_age_hours is set
-                if self.max_age_hours > 0 and published_time < cutoff_time:
+                if cutoff_time is not None and published_time < cutoff_time:
                     continue
                 
                 # Extract source from entry (feedparser provides source info)
