@@ -84,7 +84,7 @@ def lookup_ticker_yfinance(symbol: str) -> Dict[str, Any]:
         if not info:
             out["reason"] = "empty_info"
             return out
-        name = info.get("shortName") or info.get("longName") or info.get("longBusinessSummary")
+        name = info.get("longName") or info.get("shortName") or info.get("longBusinessSummary")
         if not name:
             out["reason"] = "missing_name"
             return out

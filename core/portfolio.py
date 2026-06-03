@@ -87,6 +87,9 @@ def compute_positions_from_ledger(portfolio_id: int) -> Tuple[float, List[dict]]
             market_value = mark * qty
             avg_cost_display = cost_total / qty if qty else 0.0
 
+        unrealized_pnl = round(market_value - cost_total, 2)
+        cost_basis = round(cost_total, 2)
+        pnl_pct = round(unrealized_pnl / cost_basis * 100, 2) if cost_basis > 0 else 0.0
         positions.append(
             {
                 "ticker": h["ticker"],
@@ -94,7 +97,10 @@ def compute_positions_from_ledger(portfolio_id: int) -> Tuple[float, List[dict]]
                 "quantity": qty,
                 "avg_cost": avg_cost_display,
                 "mark_price": mark,
-                "market_value": market_value,
+                "market_value": round(market_value, 2),
+                "cost_basis": cost_basis,
+                "unrealized_pnl": unrealized_pnl,
+                "unrealized_pnl_pct": pnl_pct,
                 "strike": h.get("strike"),
                 "expiry": h.get("expiry"),
                 "is_option": is_option_instrument_type(inst),
@@ -108,11 +114,16 @@ def compute_nav(portfolio_id: int) -> dict:
     invested = sum(p.get("market_value", 0) for p in positions)
     nav = cash + invested
     cash_pct = (cash / nav * 100) if nav > 0 else 100.0
+    unrealized_pnl = round(sum(p.get("unrealized_pnl", 0) for p in positions), 2)
+    cost_basis = sum(p.get("cost_basis", 0) for p in positions)
+    unrealized_pnl_pct = round(unrealized_pnl / cost_basis * 100, 2) if cost_basis > 0 else 0.0
     return {
         "cash_usd": round(cash, 2),
         "nav_usd": round(nav, 2),
         "invested_usd": round(invested, 2),
         "cash_pct": round(cash_pct, 2),
+        "unrealized_pnl": unrealized_pnl,
+        "unrealized_pnl_pct": unrealized_pnl_pct,
         "positions": positions,
     }
 
