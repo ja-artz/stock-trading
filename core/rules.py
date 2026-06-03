@@ -57,6 +57,67 @@ def parse_rules(rules_json: str | dict | None) -> dict[str, Any]:
     return base
 
 
+def validate_rules_update(rules: dict[str, Any]) -> List[str]:
+    """Return human-readable validation errors for a rules patch."""
+    errors: List[str] = []
+
+    tier_keys = ("tier_1_pct", "tier_2_pct", "tier_3_pct", "dry_powder_pct")
+    if any(k in rules for k in tier_keys):
+        merged = parse_rules(rules)
+        tier_sum = sum(float(merged.get(k, 0)) for k in tier_keys)
+        if abs(tier_sum - 100.0) > 0.01:
+            errors.append(f"Tier budget percentages must sum to 100% (currently {tier_sum:.1f}%).")
+
+    pct_fields = (
+        "max_position_pct_nav",
+        "cash_floor_pct",
+        "max_sector_pct_nav",
+        "max_theme_pct_nav",
+        "max_portfolio_options_pct",
+        "tier_2_max_options_pct",
+        "tier_3_max_options_pct",
+        *tier_keys,
+    )
+    for key in pct_fields:
+        if key not in rules:
+            continue
+        try:
+            val = float(rules[key])
+        except (TypeError, ValueError):
+            errors.append(f"{key} must be a number.")
+            continue
+        if val < 0 or val > 100:
+            errors.append(f"{key} must be between 0 and 100.")
+
+    int_fields = (
+        "max_new_positions_per_week",
+        "max_open_option_positions",
+        "tier_1_max_positions",
+        "tier_2_max_positions",
+        "tier_3_max_positions",
+        "tier_1_max_new_trades_per_month",
+        "trade_commit_hours",
+        "weekly_plan_hour_local",
+    )
+    for key in int_fields:
+        if key not in rules:
+            continue
+        try:
+            val = int(rules[key])
+        except (TypeError, ValueError):
+            errors.append(f"{key} must be an integer.")
+            continue
+        if val < 0:
+            errors.append(f"{key} must be zero or greater.")
+
+    if "weekly_plan_hour_local" in rules:
+        hour = int(rules["weekly_plan_hour_local"])
+        if hour < 0 or hour > 23:
+            errors.append("weekly_plan_hour_local must be between 0 and 23.")
+
+    return errors
+
+
 def is_option_instrument(instrument_type: str) -> bool:
     t = (instrument_type or "stock").lower()
     return t in ("call_option", "put_option", "call", "put", "option")

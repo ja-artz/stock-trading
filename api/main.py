@@ -21,7 +21,8 @@ from core.position_close import close_position
 from core.portfolio_setup import clear_weekly_recommendations, fresh_start, reset_portfolio_to_cash
 from core.portfolio import compute_nav
 from core.ticker_names import enrich_nav_state, resolve_company_names
-from core.rules import DEFAULT_RULES, parse_rules
+from core.rules import DEFAULT_RULES, parse_rules, validate_rules_update
+from core.tier_config import get_tier_catalog, get_tier_exit_logic
 from core.snapshots import get_latest_snapshot
 from performance_agent import PerformanceAgent
 from pipeline.daily_analysis import run_daily_analysis
@@ -584,15 +585,44 @@ def history(limit: int = 50):
     return {"events": store.get_timeline(1, limit=limit)}
 
 
+class RulesUpdateRequest(BaseModel):
+    portfolio_id: int = 1
+    rules: dict[str, Any]
+
+
 @app.get("/settings/rules")
 def get_rules(portfolio_id: Optional[int] = None):
     session = store.get_active_session()
     if not session:
-        return {"rules": DEFAULT_RULES}
+        return {
+            "rules": DEFAULT_RULES,
+            "defaults": DEFAULT_RULES,
+            "tier_catalog": get_tier_catalog(DEFAULT_RULES),
+            "tier_exit_logic": get_tier_exit_logic(),
+        }
     pid = portfolio_id or _default_portfolio_id()
+    rules = store.get_portfolio_rules(pid, session["rules_json"])
     return {
-        "rules": store.get_portfolio_rules(pid, session["rules_json"]),
+        "rules": rules,
+        "defaults": DEFAULT_RULES,
+        "tier_catalog": get_tier_catalog(rules),
+        "tier_exit_logic": get_tier_exit_logic(),
         "session": {"name": session["name"], "started_at": session["started_at"], "status": session["status"]},
+    }
+
+
+@app.post("/settings/rules", dependencies=[Depends(require_api_key)])
+def update_rules(body: RulesUpdateRequest):
+    session = store.get_active_session()
+    if not session:
+        raise HTTPException(503, "No active session")
+    errors = validate_rules_update(body.rules)
+    if errors:
+        raise HTTPException(400, detail={"errors": errors})
+    saved = store.save_portfolio_rules(body.portfolio_id, body.rules)
+    return {
+        "rules": saved,
+        "tier_catalog": get_tier_catalog(saved),
     }
 
 

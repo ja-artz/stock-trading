@@ -7,10 +7,21 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { TradingRulesForm } from "@/components/settings/TradingRulesForm";
+import { TierExitLogicPanel, type TierExitLogic } from "@/components/settings/TierExitLogicPanel";
+import type { TierDefinition } from "@/lib/tierLabels";
+
+type RulesResponse = {
+  rules: Record<string, unknown>;
+  defaults: Record<string, unknown>;
+  tier_catalog?: TierDefinition[];
+  tier_exit_logic?: TierExitLogic;
+  session?: { started_at: string };
+};
 
 export function SettingsPage() {
   const navigate = useNavigate();
-  const [rules, setRules] = useState<Record<string, unknown> | null>(null);
+  const [rulesData, setRulesData] = useState<RulesResponse | null>(null);
   const [sessionStarted, setSessionStarted] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState(localStorage.getItem("apiKey") || "");
   const [cashUsd, setCashUsd] = useState("1000");
@@ -26,12 +37,10 @@ export function SettingsPage() {
   const [busy, setBusy] = useState("");
 
   const load = () => {
-    api
-      .get<{ rules: Record<string, unknown>; session?: { started_at: string } }>("/settings/rules")
-      .then((r) => {
-        setRules(r.rules);
-        setSessionStarted(r.session?.started_at || null);
-      });
+    api.get<RulesResponse>("/settings/rules").then((r) => {
+      setRulesData(r);
+      setSessionStarted(r.session?.started_at || null);
+    });
     api.get<{ initial_cash?: number; trade_count?: number; is_cash_only?: boolean }>("/portfolio").then((r) => {
       setPortfolioMeta({
         initial_cash: r.initial_cash,
@@ -48,6 +57,22 @@ export function SettingsPage() {
   const saveKey = () => {
     localStorage.setItem("apiKey", apiKey);
     setStatus("API key saved.");
+  };
+
+  const saveRules = async (rules: Record<string, unknown>) => {
+    const r = await api.post<{ rules: Record<string, unknown>; tier_catalog?: TierDefinition[] }>(
+      "/settings/rules",
+      { portfolio_id: 1, rules }
+    );
+    setRulesData((prev) =>
+      prev
+        ? {
+            ...prev,
+            rules: r.rules,
+            tier_catalog: r.tier_catalog ?? prev.tier_catalog,
+          }
+        : null
+    );
   };
 
   const resetCash = async () => {
@@ -105,7 +130,7 @@ export function SettingsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold">Settings</h1>
-        <p className="text-gray-600 mt-1">Trading rules, API access, and starting portfolio state</p>
+        <p className="text-gray-600 mt-1">Trading rules, tier exit logic, API access, and starting portfolio state</p>
       </div>
 
       {portfolioMeta && !portfolioMeta.is_cash_only && (
@@ -115,6 +140,19 @@ export function SettingsPage() {
             not mock UI. Use <strong>Reset to cash</strong> below for a clean $1,000 starting point.
           </AlertDescription>
         </Alert>
+      )}
+
+      {rulesData && (
+        <>
+          <TradingRulesForm
+            rules={rulesData.rules}
+            defaults={rulesData.defaults}
+            tierCatalog={rulesData.tier_catalog}
+            sessionStarted={sessionStarted}
+            onSave={saveRules}
+          />
+          {rulesData.tier_exit_logic && <TierExitLogicPanel logic={rulesData.tier_exit_logic} />}
+        </>
       )}
 
       <Card className="border-amber-200">
@@ -216,7 +254,7 @@ export function SettingsPage() {
         </CardHeader>
         <CardContent className="space-y-3">
           <p className="text-sm text-gray-600">
-            Required for reset, import, runs, trades, and decisions. Match{" "}
+            Required for reset, import, runs, trades, decisions, and saving trading rules. Match{" "}
             <code className="bg-gray-100 px-1 rounded">HOUSEHOLD_API_KEY</code> in server `.env`.
           </p>
           <div>
@@ -234,20 +272,6 @@ export function SettingsPage() {
       </Card>
 
       {status && <p className="text-sm text-blue-700">{status}</p>}
-
-      {rules && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Trading rules</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <pre className="text-xs bg-gray-50 p-4 rounded-lg overflow-auto">{JSON.stringify(rules, null, 2)}</pre>
-            {sessionStarted && (
-              <p className="text-xs text-gray-500 mt-4">Session started {new Date(sessionStarted).toLocaleString()}</p>
-            )}
-          </CardContent>
-        </Card>
-      )}
     </div>
   );
 }
