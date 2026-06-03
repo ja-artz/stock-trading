@@ -480,6 +480,21 @@ def assign_position_tier(body: AssignLotTierRequest):
         raise HTTPException(400, detail=str(e)) from e
 
 
+@app.get("/portfolio/position")
+def get_portfolio_position(
+    ticker: str = Query(..., min_length=1),
+    instrument_type: str = Query("stock"),
+    portfolio_id: Optional[int] = None,
+):
+    from core.position_detail import get_position_detail
+
+    pid = portfolio_id or _default_portfolio_id()
+    try:
+        return get_position_detail(pid, ticker, instrument_type)
+    except ValueError as e:
+        raise HTTPException(404, detail=str(e)) from e
+
+
 @app.get("/portfolio")
 def get_portfolio(portfolio_id: Optional[int] = None):
     pid = portfolio_id or _default_portfolio_id()

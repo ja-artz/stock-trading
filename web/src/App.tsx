@@ -6,6 +6,7 @@ import { StoriesPage } from "@/pages/StoriesPage";
 import { StoryDetailPage } from "@/pages/StoryDetailPage";
 import { RecommendationsPage } from "@/pages/RecommendationsPage";
 import { PortfolioPage } from "@/pages/PortfolioPage";
+import { PositionDetailPage } from "@/pages/PositionDetailPage";
 import { InsightsPage } from "@/pages/InsightsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 
@@ -20,6 +21,7 @@ export default function App() {
             <Route path="stories/:index" element={<StoryDetailPage />} />
             <Route path="recommendations" element={<RecommendationsPage />} />
             <Route path="portfolio" element={<PortfolioPage />} />
+            <Route path="portfolio/:ticker" element={<PositionDetailPage />} />
             <Route path="insights" element={<InsightsPage />} />
             <Route path="settings" element={<SettingsPage />} />
           </Route>

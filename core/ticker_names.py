@@ -7,17 +7,20 @@ from typing import Any, Dict, Iterable, List, Optional
 from validation import lookup_ticker_yfinance
 
 _name_cache: Dict[str, Optional[str]] = {}
+# Bump when lookup preference changes so stale short names are not reused.
+_NAME_CACHE_VERSION = "longname-v1"
 
 
 def company_name_for(symbol: str) -> Optional[str]:
     sym = (symbol or "").strip().upper()
     if not sym:
         return None
-    if sym in _name_cache:
-        return _name_cache[sym]
+    cache_key = f"{_NAME_CACHE_VERSION}:{sym}"
+    if cache_key in _name_cache:
+        return _name_cache[cache_key]
     lu = lookup_ticker_yfinance(sym)
     name = lu.get("company_name") if lu.get("valid") else None
-    _name_cache[sym] = name
+    _name_cache[cache_key] = name
     return name
 
 

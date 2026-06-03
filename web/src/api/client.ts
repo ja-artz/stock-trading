@@ -48,6 +48,11 @@ export type Position = {
   avg_cost: number;
   mark_price: number;
   market_value: number;
+  cost_basis?: number;
+  unrealized_pnl?: number;
+  unrealized_pnl_pct?: number;
+  is_option?: boolean;
+  expiry?: string | null;
 };
 
 export type IndirectTicker = {
