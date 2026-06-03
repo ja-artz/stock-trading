@@ -79,6 +79,21 @@ def get_portfolio_rules(portfolio_id: int, session_rules_json: str) -> dict:
         return parse_rules(session_rules_json)
 
 
+def save_portfolio_rules(portfolio_id: int, rules: dict[str, Any]) -> dict:
+    merged = parse_rules(rules)
+    payload = json.dumps(merged)
+    with db_session() as conn:
+        conn.execute(
+            """
+            INSERT INTO portfolio_rules (portfolio_id, rules_json)
+            VALUES (?, ?)
+            ON CONFLICT(portfolio_id) DO UPDATE SET rules_json = excluded.rules_json
+            """,
+            (portfolio_id, payload),
+        )
+    return merged
+
+
 def create_analysis_run(
     household_id: int,
     payload: list,

@@ -169,6 +169,111 @@ PROFIT_RECYCLING: Dict[int, List[Tuple[int, float]]] = {
     3: [(3, 0.5), (2, 0.25), (4, 0.25)],
 }
 
+EXIT_ACTION_LABELS: Dict[str, str] = {
+    "close_all": "Close entire position",
+    "hard_stop": "Hard stop (immediate exit)",
+    "partial_50_breakeven_remainder": "Take 50% profit · breakeven stop on remainder",
+    "partial_75_trail_remainder": "Take 75% profit · trail remainder",
+    "partial_25_hold_remainder": "Take 25% profit · hold remainder",
+    "partial_50_hold_remainder": "Take 50% profit · hold remainder",
+    "partial_75_hold_remainder": "Take 75% profit · hold remainder",
+    "partial_50_reduce": "Reduce position by 50%",
+    "force_exit": "Force exit (max hold reached)",
+    "decide_roll_or_close": "Decide: roll or close option",
+}
+
+
+def exit_action_label(action: str) -> str:
+    return EXIT_ACTION_LABELS.get(action, action.replace("_", " ").title())
+
+
+def _serialize_exit_steps(steps: List[ExitStep]) -> List[dict[str, Any]]:
+    return [
+        {
+            "threshold_pct": s.threshold_pct,
+            "action": s.action,
+            "action_label": exit_action_label(s.action),
+            "reason_code": s.reason_code,
+            "priority": s.priority,
+        }
+        for s in steps
+    ]
+
+
+def _serialize_time_rules(tier: int, rules: Dict[str, Any]) -> List[dict[str, str]]:
+    lines: List[dict[str, str]] = []
+    max_days = rules.get("max_hold_days") or TIER_HOLD_DAYS_MAX.get(tier)
+    if max_days:
+        reason = rules.get("force_exit_reason") or rules.get("force_decision_reason") or f"tier_{tier}_max_hold"
+        lines.append({"kind": "max_hold", "label": f"Max hold {max_days} days → force exit ({reason})"})
+
+    if rules.get("option_expiry_warn_days") is not None:
+        d = rules["option_expiry_warn_days"]
+        lines.append({"kind": "option_expiry", "label": f"Options within {d} days of expiry → roll or close"})
+
+    if rules.get("review_interval_days"):
+        lines.append({"kind": "review", "label": f"Review every {rules['review_interval_days']} days"})
+
+    if rules.get("reduce_at_days"):
+        action = exit_action_label(rules.get("reduce_action", "partial_50_reduce"))
+        lines.append(
+            {
+                "kind": "reduce",
+                "label": f"After {rules['reduce_at_days']} days with stalled thesis → {action}",
+            }
+        )
+
+    if rules.get("defeat_at_days"):
+        down = rules.get("defeat_down_pct", -30)
+        lines.append(
+            {
+                "kind": "defeat",
+                "label": f"After {rules['defeat_at_days']} days at {down:+.0f}% P/L → close entire position",
+            }
+        )
+
+    return lines
+
+
+def get_tier_exit_logic() -> dict[str, Any]:
+    """Serializable tier exit ladders and thesis rules for API/UI."""
+    tiers: List[dict[str, Any]] = []
+    for tier in DEPLOYABLE_TIERS:
+        recycling = [
+            {"target_tier": t, "fraction_pct": round(f * 100)}
+            for t, f in PROFIT_RECYCLING.get(tier, [])
+        ]
+        tiers.append(
+            {
+                "tier": tier,
+                "name": tier_display_name(tier),
+                "profit_ladder": _serialize_exit_steps(TIER_PROFIT_LADDERS.get(tier, [])),
+                "loss_ladder": _serialize_exit_steps(TIER_LOSS_LADDERS.get(tier, [])),
+                "time_rules": _serialize_time_rules(tier, TIER_TIME_RULES.get(tier, {})),
+                "profit_recycling": recycling,
+            }
+        )
+
+    thesis_exits = [
+        {
+            "thesis_status": status.replace("_", " "),
+            "action": action,
+            "action_label": exit_action_label(action),
+            "reason_code": reason,
+            "priority": priority,
+        }
+        for status, (action, reason, priority) in THESIS_EXIT_ACTIONS.items()
+    ]
+
+    return {
+        "tiers": tiers,
+        "thesis_exits": thesis_exits,
+        "notes": [
+            "Profit and loss ladders evaluate from strictest threshold first; already-fired steps are skipped.",
+            "Tier exit logic is defined in tier_config.py and enforced by the daily discipline runner.",
+        ],
+    }
+
 
 def tier_budget_pct(rules: dict[str, Any], tier: int) -> float:
     key = f"tier_{tier}_pct" if tier < 4 else "dry_powder_pct"
