@@ -657,6 +657,28 @@ def latest_insights(portfolio_id: Optional[int] = None):
     return {"report": report}
 
 
+@app.get("/insights/performance")
+def insights_performance(
+    portfolio_id: Optional[int] = None,
+    period: str = Query("30d", description="7d | 30d | 90d | ytd | all"),
+):
+    from core.insights_analytics import build_performance_insights
+
+    pid = portfolio_id or _default_portfolio_id()
+    return build_performance_insights(pid, period)
+
+
+@app.get("/insights/personas")
+def insights_personas(
+    portfolio_id: Optional[int] = None,
+    period: str = Query("30d", description="7d | 30d | 90d | ytd | all"),
+):
+    from core.insights_analytics import build_persona_insights
+
+    pid = portfolio_id or _default_portfolio_id()
+    return build_persona_insights(pid, period)
+
+
 @app.post("/chat/threads")
 def create_chat_thread(body: ChatThreadCreate):
     session = store.get_active_session()
