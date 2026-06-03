@@ -8,6 +8,7 @@ import {
   Settings,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { AgentChatDrawer } from "@/components/AgentChatDrawer";
 
 const nav = [
   { to: "/", label: "Home", icon: Home, end: true },
@@ -66,6 +67,7 @@ export function Layout() {
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <Outlet />
       </main>
+      <AgentChatDrawer />
       <footer className="border-t border-gray-200 bg-white">
         <div className="max-w-7xl mx-auto px-4 py-4">
           <p className="text-xs text-gray-500 text-center">

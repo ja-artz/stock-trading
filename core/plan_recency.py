@@ -61,8 +61,9 @@ def last_plan_timing_block(
     current_analysis_at: str,
     current_analysis_run_id: int,
     last_analysis_run_id: Optional[int] = None,
+    now: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    mins = minutes_since(plan_at) if plan_at else None
+    mins = minutes_since(plan_at, now=now) if plan_at else None
     same_analysis = analysis_timestamps_match(based_on_analysis_at, current_analysis_at)
     if last_analysis_run_id is not None and current_analysis_run_id:
         same_run = int(last_analysis_run_id) == int(current_analysis_run_id)

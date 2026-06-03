@@ -9,6 +9,17 @@ from typing import Any, List, Optional
 from core.db import db_session, init_db, row_to_dict
 from core.plan_sizing import normalize_plan_item_sizing
 from core.rules import parse_rules, pacific_week_start
+from core.tier_config import normalize_capital_tier, normalize_conviction
+
+
+def _plan_item_tier_fields(item: dict) -> tuple:
+    return (
+        normalize_capital_tier(item.get("capital_tier")),
+        normalize_conviction(item.get("conviction_grade")),
+        item.get("sector"),
+        item.get("theme_tag"),
+        item.get("correlation_group"),
+    )
 
 
 def utc_now_iso() -> str:
@@ -156,14 +167,16 @@ def create_weekly_plan(
         plan_id = int(cur.lastrowid)
         for raw in items:
             item = normalize_plan_item_sizing(dict(raw))
+            ct, cg, sec, theme, corr = _plan_item_tier_fields(item)
             conn.execute(
                 """
                 INSERT INTO plan_items
                 (weekly_plan_id, priority, action, ticker, instrument_type, horizon, size_hint,
                  suggested_notional_usd, suggested_quantity, quantity_unit,
                  pct_nav, pct_cash, pct_position, sizing_summary, detail_json,
-                 persona_consensus, rationale, rule_warnings)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 persona_consensus, rationale, rule_warnings,
+                 capital_tier, conviction_grade, sector, theme_tag, correlation_group)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     plan_id,
@@ -184,6 +197,11 @@ def create_weekly_plan(
                     json.dumps(item.get("persona_consensus")) if item.get("persona_consensus") else None,
                     item.get("rationale"),
                     json.dumps(item.get("rule_warnings")) if item.get("rule_warnings") else None,
+                    ct,
+                    cg,
+                    sec,
+                    theme,
+                    corr,
                 ),
             )
         port = conn.execute("SELECT session_id FROM portfolios WHERE id = ?", (portfolio_id,)).fetchone()
@@ -219,6 +237,36 @@ def _plan_payload_indicates_no_changes(plan: dict) -> bool:
     if not isinstance(payload, dict):
         return False
     return bool(payload.get("no_changes") or payload.get("no_trade_week"))
+
+
+def _prior_plan_items_for_consensus(
+    conn, portfolio_id: int, exclude_plan_id: int, limit: int = 80
+) -> List[dict]:
+    """Recent plan line items from other plans (newest first) for consensus carry-forward."""
+    rows = conn.execute(
+        """
+        SELECT pi.ticker, pi.persona_consensus, pi.action, pi.status, pi.rationale
+        FROM plan_items pi
+        JOIN weekly_plans wp ON wp.id = pi.weekly_plan_id
+        WHERE wp.portfolio_id = ?
+          AND pi.weekly_plan_id != ?
+          AND pi.ticker IS NOT NULL
+          AND TRIM(pi.ticker) != ''
+        ORDER BY wp.plan_at DESC, pi.id DESC
+        LIMIT ?
+        """,
+        (portfolio_id, exclude_plan_id, limit),
+    ).fetchall()
+    out: List[dict] = []
+    for row in rows:
+        d = row_to_dict(row)
+        if d.get("persona_consensus"):
+            try:
+                d["persona_consensus"] = json.loads(d["persona_consensus"])
+            except json.JSONDecodeError:
+                d["persona_consensus"] = None
+        out.append(d)
+    return out
 
 
 def _hydrate_plan_items(conn, plan_id: int, portfolio_id: int) -> List[dict]:
@@ -263,9 +311,12 @@ def _hydrate_plan_items(conn, plan_id: int, portfolio_id: int) -> List[dict]:
         d["auto_trade"] = row_to_dict(led) if led else None
         plan_items.append(d)
 
+    from core.plan_consensus import enrich_plan_items_persona_consensus
     from core.recommendation_execution import attach_execution_status
     from core.ticker_names import enrich_rows_with_company_name
 
+    prior_for_consensus = _prior_plan_items_for_consensus(conn, portfolio_id, plan_id)
+    plan_items = enrich_plan_items_persona_consensus(plan_items, prior_for_consensus)
     attach_execution_status(plan_items, portfolio_id)
     return enrich_rows_with_company_name(plan_items)
 
@@ -401,7 +452,7 @@ def get_recent_weekly_plans_context(portfolio_id: int, limit: int = 2) -> List[d
             items = conn.execute(
                 """
                 SELECT id, priority, action, ticker, instrument_type,
-                       sizing_summary, size_hint, status, rationale
+                       sizing_summary, size_hint, status, rationale, persona_consensus
                 FROM plan_items
                 WHERE weekly_plan_id = ?
                 ORDER BY priority, id
@@ -423,6 +474,12 @@ def get_recent_weekly_plans_context(portfolio_id: int, limit: int = 2) -> List[d
                     (d["id"],),
                 ).fetchone()
                 rationale = (d.get("rationale") or "").strip()
+                persona_consensus = d.get("persona_consensus")
+                if persona_consensus:
+                    try:
+                        persona_consensus = json.loads(persona_consensus)
+                    except json.JSONDecodeError:
+                        persona_consensus = None
                 item_rows.append(
                     {
                         "priority": d["priority"],
@@ -432,6 +489,7 @@ def get_recent_weekly_plans_context(portfolio_id: int, limit: int = 2) -> List[d
                         "sizing": d.get("sizing_summary") or d.get("size_hint"),
                         "status": d["status"],
                         "rationale_excerpt": rationale[:240] if rationale else None,
+                        "persona_consensus": persona_consensus,
                         "latest_decision": row_to_dict(dec) if dec else None,
                     }
                 )
@@ -552,6 +610,324 @@ def get_latest_insight(household_id: int = 1, portfolio_id: Optional[int] = None
         d = row_to_dict(row)
         d["payload"] = json.loads(d["payload_json"])
         return d
+
+
+def get_plan_item(plan_item_id: int, portfolio_id: int) -> Optional[dict]:
+    with db_session() as conn:
+        row = conn.execute(
+            """
+            SELECT pi.* FROM plan_items pi
+            JOIN weekly_plans wp ON wp.id = pi.weekly_plan_id
+            WHERE pi.id = ? AND wp.portfolio_id = ?
+            """,
+            (plan_item_id, portfolio_id),
+        ).fetchone()
+        if not row:
+            return None
+        items = _hydrate_plan_items(conn, int(row["weekly_plan_id"]), portfolio_id)
+        for it in items:
+            if int(it["id"]) == plan_item_id:
+                return it
+        return row_to_dict(row)
+
+
+def update_plan_item(plan_item_id: int, portfolio_id: int, item: dict) -> None:
+    item = normalize_plan_item_sizing(dict(item))
+    with db_session() as conn:
+        row = conn.execute(
+            """
+            SELECT pi.id FROM plan_items pi
+            JOIN weekly_plans wp ON wp.id = pi.weekly_plan_id
+            WHERE pi.id = ? AND wp.portfolio_id = ?
+            """,
+            (plan_item_id, portfolio_id),
+        ).fetchone()
+        if not row:
+            raise ValueError(f"plan_item {plan_item_id} not found")
+        ct, cg, sec, theme, corr = _plan_item_tier_fields(item)
+        conn.execute(
+            """
+            UPDATE plan_items SET
+                priority = ?, action = ?, ticker = ?, instrument_type = ?, horizon = ?,
+                size_hint = ?, suggested_notional_usd = ?, suggested_quantity = ?,
+                quantity_unit = ?, pct_nav = ?, pct_cash = ?, pct_position = ?,
+                sizing_summary = ?, detail_json = ?, persona_consensus = ?,
+                rationale = ?, rule_warnings = ?,
+                capital_tier = ?, conviction_grade = ?, sector = ?, theme_tag = ?,
+                correlation_group = ?
+            WHERE id = ?
+            """,
+            (
+                item.get("priority", 1),
+                item.get("action", "watch"),
+                item.get("ticker"),
+                item.get("instrument_type"),
+                item.get("horizon"),
+                item.get("size_hint"),
+                item.get("suggested_notional_usd"),
+                item.get("suggested_quantity"),
+                item.get("quantity_unit"),
+                item.get("pct_nav"),
+                item.get("pct_cash"),
+                item.get("pct_position"),
+                item.get("sizing_summary"),
+                json.dumps(item),
+                json.dumps(item.get("persona_consensus")) if item.get("persona_consensus") else None,
+                item.get("rationale"),
+                json.dumps(item.get("rule_warnings")) if item.get("rule_warnings") else None,
+                ct,
+                cg,
+                sec,
+                theme,
+                corr,
+                plan_item_id,
+            ),
+        )
+
+
+def insert_plan_item(weekly_plan_id: int, portfolio_id: int, item: dict) -> int:
+    item = normalize_plan_item_sizing(dict(item))
+    with db_session() as conn:
+        wp = conn.execute(
+            "SELECT id FROM weekly_plans WHERE id = ? AND portfolio_id = ?",
+            (weekly_plan_id, portfolio_id),
+        ).fetchone()
+        if not wp:
+            raise ValueError("Trading plan not found")
+        max_pri = conn.execute(
+            "SELECT COALESCE(MAX(priority), 0) AS m FROM plan_items WHERE weekly_plan_id = ?",
+            (weekly_plan_id,),
+        ).fetchone()["m"]
+        priority = item.get("priority") or int(max_pri) + 1
+        ct, cg, sec, theme, corr = _plan_item_tier_fields(item)
+        cur = conn.execute(
+            """
+            INSERT INTO plan_items
+            (weekly_plan_id, priority, action, ticker, instrument_type, horizon, size_hint,
+             suggested_notional_usd, suggested_quantity, quantity_unit,
+             pct_nav, pct_cash, pct_position, sizing_summary, detail_json,
+             persona_consensus, rationale, rule_warnings,
+             capital_tier, conviction_grade, sector, theme_tag, correlation_group)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                weekly_plan_id,
+                priority,
+                item.get("action", "watch"),
+                item.get("ticker"),
+                item.get("instrument_type"),
+                item.get("horizon"),
+                item.get("size_hint"),
+                item.get("suggested_notional_usd"),
+                item.get("suggested_quantity"),
+                item.get("quantity_unit"),
+                item.get("pct_nav"),
+                item.get("pct_cash"),
+                item.get("pct_position"),
+                item.get("sizing_summary"),
+                json.dumps(item),
+                json.dumps(item.get("persona_consensus")) if item.get("persona_consensus") else None,
+                item.get("rationale"),
+                json.dumps(item.get("rule_warnings")) if item.get("rule_warnings") else None,
+                ct,
+                cg,
+                sec,
+                theme,
+                corr,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def supersede_plan_item(plan_item_id: int, portfolio_id: int) -> None:
+    with db_session() as conn:
+        row = conn.execute(
+            """
+            SELECT pi.id FROM plan_items pi
+            JOIN weekly_plans wp ON wp.id = pi.weekly_plan_id
+            WHERE pi.id = ? AND wp.portfolio_id = ? AND pi.status = 'pending'
+            """,
+            (plan_item_id, portfolio_id),
+        ).fetchone()
+        if not row:
+            raise ValueError("Only pending items can be removed")
+        conn.execute(
+            "UPDATE plan_items SET status = 'superseded' WHERE id = ?",
+            (plan_item_id,),
+        )
+
+
+def append_timeline_event(
+    household_id: int,
+    *,
+    portfolio_id: Optional[int],
+    event_type: str,
+    title: str,
+    detail: dict,
+) -> None:
+    with db_session() as conn:
+        conn.execute(
+            """
+            INSERT INTO timeline_events (household_id, portfolio_id, event_type, title, detail_json, occurred_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (household_id, portfolio_id, event_type, title, json.dumps(detail), utc_now_iso()),
+        )
+
+
+def create_chat_thread(
+    household_id: int,
+    portfolio_id: int,
+    *,
+    weekly_plan_id: Optional[int] = None,
+    title: Optional[str] = None,
+    focus: Optional[dict] = None,
+) -> int:
+    now = utc_now_iso()
+    with db_session() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO agent_chat_threads
+            (household_id, portfolio_id, weekly_plan_id, title, focus_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                household_id,
+                portfolio_id,
+                weekly_plan_id,
+                title,
+                json.dumps(focus) if focus else None,
+                now,
+                now,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def list_chat_threads(portfolio_id: int, limit: int = 20) -> List[dict]:
+    with db_session() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM agent_chat_threads
+            WHERE portfolio_id = ?
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (portfolio_id, limit),
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = row_to_dict(r)
+            if d.get("focus_json"):
+                d["focus"] = json.loads(d["focus_json"])
+            out.append(d)
+        return out
+
+
+def get_chat_thread(thread_id: int, portfolio_id: int) -> Optional[dict]:
+    with db_session() as conn:
+        row = conn.execute(
+            "SELECT * FROM agent_chat_threads WHERE id = ? AND portfolio_id = ?",
+            (thread_id, portfolio_id),
+        ).fetchone()
+        if not row:
+            return None
+        d = row_to_dict(row)
+        if d.get("focus_json"):
+            d["focus"] = json.loads(d["focus_json"])
+        return d
+
+
+def update_chat_thread_focus(thread_id: int, portfolio_id: int, focus: dict) -> None:
+    with db_session() as conn:
+        conn.execute(
+            """
+            UPDATE agent_chat_threads
+            SET focus_json = ?, updated_at = ?
+            WHERE id = ? AND portfolio_id = ?
+            """,
+            (json.dumps(focus), utc_now_iso(), thread_id, portfolio_id),
+        )
+
+
+def touch_chat_thread(thread_id: int) -> None:
+    with db_session() as conn:
+        conn.execute(
+            "UPDATE agent_chat_threads SET updated_at = ? WHERE id = ?",
+            (utc_now_iso(), thread_id),
+        )
+
+
+def add_chat_message(
+    thread_id: int,
+    role: str,
+    content: str,
+    metadata: Optional[dict] = None,
+) -> int:
+    with db_session() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO agent_chat_messages (thread_id, role, content, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (thread_id, role, content, json.dumps(metadata) if metadata else None, utc_now_iso()),
+        )
+        conn.execute(
+            "UPDATE agent_chat_threads SET updated_at = ? WHERE id = ?",
+            (utc_now_iso(), thread_id),
+        )
+        return int(cur.lastrowid)
+
+
+def get_chat_messages(thread_id: int, limit: int = 100) -> List[dict]:
+    with db_session() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM agent_chat_messages
+            WHERE thread_id = ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (thread_id, limit),
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = row_to_dict(r)
+            if d.get("metadata_json"):
+                d["metadata"] = json.loads(d["metadata_json"])
+            out.append(d)
+        return out
+
+
+def save_plan_revision_proposal(
+    *,
+    thread_id: Optional[int],
+    weekly_plan_id: int,
+    portfolio_id: int,
+    revision: dict,
+    preview: dict,
+    status: str = "pending",
+) -> int:
+    now = utc_now_iso()
+    with db_session() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO plan_revision_proposals
+            (thread_id, weekly_plan_id, portfolio_id, revision_json, preview_json, status, created_at, applied_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                thread_id,
+                weekly_plan_id,
+                portfolio_id,
+                json.dumps(revision),
+                json.dumps(preview),
+                status,
+                now,
+                now if status == "applied" else None,
+            ),
+        )
+        return int(cur.lastrowid)
 
 
 def count_new_positions_this_week(portfolio_id: int) -> int:

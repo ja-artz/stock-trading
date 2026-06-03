@@ -161,8 +161,17 @@ def check_plan_item_coherence(item: dict[str, Any], plan_as_of: date) -> List[st
 
 def apply_plan_item_coherence(item: dict[str, Any], plan_as_of: date) -> dict[str, Any]:
     """Normalize option fields and merge coherence warnings into rule_warnings."""
+    from core.tier_engine import check_tier_horizon_coherence
+
     item = normalize_option_contract(item)
     new_warnings = check_plan_item_coherence(item, plan_as_of)
+    new_warnings.extend(
+        check_tier_horizon_coherence(
+            item.get("capital_tier"),
+            item.get("horizon"),
+            item.get("expected_exit_months"),
+        )
+    )
     if not new_warnings:
         return item
     existing = item.get("rule_warnings")

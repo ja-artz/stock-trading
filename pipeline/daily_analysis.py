@@ -34,6 +34,7 @@ async def run_daily_analysis(
     run_type: str = "daily",
     household_id: int = 1,
     on_progress: Optional[ProgressCallback] = None,
+    articles: Optional[List[dict]] = None,
 ) -> DailyAnalysisResult:
     emit_progress(
         on_progress,
@@ -42,24 +43,32 @@ async def run_daily_analysis(
         set_stage=True,
     )
 
-    collector = NewsCollector(
-        rss_url=config.GOOGLE_NEWS_RSS_URL,
-        max_age_hours=config.MAX_NEWS_AGE_HOURS,
-    )
-    emit_progress(
-        on_progress,
-        "fetch_news",
-        f"Fetching RSS news (pool up to {config.NEWS_FETCH_POOL_SIZE} articles, max age {config.MAX_NEWS_AGE_HOURS}h)…",
-    )
-    articles = await asyncio.to_thread(
-        collector.get_general_news, num_results=config.NEWS_FETCH_POOL_SIZE
-    )
-    emit_progress(
-        on_progress,
-        "fetch_news",
-        f"Fetched {len(articles)} articles from feed",
-        set_stage=False,
-    )
+    if articles is None:
+        collector = NewsCollector(
+            rss_url=config.GOOGLE_NEWS_RSS_URL,
+            max_age_hours=config.MAX_NEWS_AGE_HOURS,
+        )
+        emit_progress(
+            on_progress,
+            "fetch_news",
+            f"Fetching RSS news (pool up to {config.NEWS_FETCH_POOL_SIZE} articles, max age {config.MAX_NEWS_AGE_HOURS}h)…",
+        )
+        articles = await asyncio.to_thread(
+            collector.get_general_news, num_results=config.NEWS_FETCH_POOL_SIZE
+        )
+        emit_progress(
+            on_progress,
+            "fetch_news",
+            f"Fetched {len(articles)} articles from feed",
+            set_stage=False,
+        )
+    else:
+        emit_progress(
+            on_progress,
+            "fetch_news",
+            f"Using {len(articles)} pre-fetched articles",
+            set_stage=False,
+        )
     if not articles:
         emit_progress(on_progress, "done", "No articles found in feed — nothing to analyze", set_stage=True)
         return DailyAnalysisResult([], None, None, 0, 0)
@@ -180,6 +189,14 @@ async def run_daily_analysis(
             f"Saved analysis_run_id={run_id}",
             set_stage=False,
         )
+
+    if persist:
+        try:
+            from core.tier_discipline import run_daily_discipline
+
+            await asyncio.to_thread(run_daily_discipline, 1)
+        except Exception:
+            pass
 
     emit_progress(
         on_progress,

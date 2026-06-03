@@ -219,6 +219,7 @@ Return valid JSON only, no markdown, with exactly this structure:
       "ticker": "SYMBOL",
       "instrument_type": "stock|call_option|put_option",
       "recommended_tier": 1,
+      "conviction_grade": "A_plus|A|B_plus|B",
       "allocation_percent": "wording only, relative to tier or risk budget",
       "rationale": "...",
       "entry_trigger": "...",
@@ -241,7 +242,7 @@ Return valid JSON only, no markdown, with exactly this structure:
 Guidelines:
 - US-listed only; correct tickers (e.g. AAPL not APPL).
 - If no clear trade, use empty recommendations and explain in thesis.
-- risk_level 1-10; tier 1 quick (weeks), 2 medium, 3 long, 4 speculative."""
+- risk_level 1-10; recommended_tier 1 quick (1-4 weeks), 2 medium (3-6 months), 3 long (6-12 months). Do not use tier 4 for trades (portfolio dry powder is separate)."""
 
     def analyze_story_for_profile(
         self,

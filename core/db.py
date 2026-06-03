@@ -154,6 +154,38 @@ CREATE TABLE IF NOT EXISTS insight_reports (
     payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS agent_chat_threads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    household_id INTEGER NOT NULL REFERENCES households(id),
+    portfolio_id INTEGER NOT NULL REFERENCES portfolios(id),
+    weekly_plan_id INTEGER REFERENCES weekly_plans(id),
+    title TEXT,
+    focus_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS agent_chat_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id INTEGER NOT NULL REFERENCES agent_chat_threads(id),
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    metadata_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS plan_revision_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id INTEGER REFERENCES agent_chat_threads(id),
+    weekly_plan_id INTEGER NOT NULL REFERENCES weekly_plans(id),
+    portfolio_id INTEGER NOT NULL REFERENCES portfolios(id),
+    revision_json TEXT NOT NULL,
+    preview_json TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    applied_at TEXT
+);
 """
 
 
@@ -205,6 +237,66 @@ _PLAN_ITEM_SIZING_COLUMNS = (
     ("detail_json", "TEXT"),
 )
 
+_PLAN_ITEM_TIER_COLUMNS = (
+    ("capital_tier", "INTEGER"),
+    ("conviction_grade", "TEXT"),
+    ("sector", "TEXT"),
+    ("theme_tag", "TEXT"),
+    ("correlation_group", "TEXT"),
+)
+
+_TIER_TABLES_SQL = """
+CREATE TABLE IF NOT EXISTS position_lots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    portfolio_id INTEGER NOT NULL REFERENCES portfolios(id),
+    ledger_event_id INTEGER NOT NULL DEFAULT 0,
+    plan_item_id INTEGER REFERENCES plan_items(id),
+    ticker TEXT NOT NULL,
+    instrument_type TEXT NOT NULL DEFAULT 'stock',
+    capital_tier INTEGER NOT NULL,
+    entry_date TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    quantity_remaining REAL NOT NULL,
+    forced_exit_date TEXT,
+    partial_exits_json TEXT NOT NULL DEFAULT '[]',
+    thesis_status TEXT NOT NULL DEFAULT 'active',
+    stop_loss_pct REAL,
+    breakeven_stop_active INTEGER NOT NULL DEFAULT 0,
+    sector TEXT,
+    theme_tag TEXT,
+    correlation_group TEXT,
+    expiry TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS action_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    portfolio_id INTEGER NOT NULL REFERENCES portfolios(id),
+    position_lot_id INTEGER REFERENCES position_lots(id),
+    plan_item_id INTEGER REFERENCES plan_items(id),
+    generated_at TEXT NOT NULL,
+    priority TEXT NOT NULL,
+    action TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    detail_json TEXT,
+    status TEXT NOT NULL DEFAULT 'open',
+    overridden_at TEXT,
+    override_note TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS tier_transfer_suggestions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    portfolio_id INTEGER NOT NULL REFERENCES portfolios(id),
+    source_tier INTEGER,
+    dest_tier INTEGER,
+    amount_usd REAL,
+    reason_code TEXT,
+    action_item_id INTEGER REFERENCES action_items(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
 
 def _migrate_plan_item_sizing(conn: sqlite3.Connection) -> None:
     existing = {row[1] for row in conn.execute("PRAGMA table_info(plan_items)").fetchall()}
@@ -213,10 +305,23 @@ def _migrate_plan_item_sizing(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE plan_items ADD COLUMN {name} {col_type}")
 
 
+def _migrate_plan_item_tier_columns(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(plan_items)").fetchall()}
+    for name, col_type in _PLAN_ITEM_TIER_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE plan_items ADD COLUMN {name} {col_type}")
+
+
+def _migrate_tier_tables(conn: sqlite3.Connection) -> None:
+    conn.executescript(_TIER_TABLES_SQL)
+
+
 def init_db() -> None:
     with db_session() as conn:
         conn.executescript(_SCHEMA)
         _migrate_plan_item_sizing(conn)
+        _migrate_plan_item_tier_columns(conn)
+        _migrate_tier_tables(conn)
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:

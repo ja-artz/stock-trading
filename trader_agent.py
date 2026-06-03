@@ -14,20 +14,28 @@ import time
 import config
 from analysis_agent import AnalysisAgent
 from core.plan_coherence import apply_plan_item_coherence
-from core.plan_recency import last_plan_timing_block
 from core.market_quotes import (
-    collect_symbols_for_quotes,
     ensure_quotes_for_tickers,
-    fetch_market_quotes,
-    format_quotes_for_prompt,
-    merge_position_marks,
     quotes_price_map,
 )
+from core.plan_consensus import apply_carry_forward_persona_consensus
 from core.plan_sizing import normalize_plan_item_sizing, reconcile_stock_sizing_with_quote
-from core.portfolio import compute_nav, open_option_count
-from core.rules import parse_rules
+from core.portfolio import open_option_count
+from core.trader_context import build_trader_context, format_context_for_plan_prompt
 from core import store
 from pipeline.progress import ProgressCallback, emit_progress
+from core.tier_config import infer_capital_tier_from_horizon, normalize_capital_tier
+
+
+def _ensure_tier_fields(item: dict) -> dict:
+    action = (item.get("action") or "").lower()
+    if action in ("watch", "hold"):
+        return item
+    if not normalize_capital_tier(item.get("capital_tier")):
+        item["capital_tier"] = infer_capital_tier_from_horizon(item.get("horizon"))
+    if not item.get("correlation_group") and item.get("ticker"):
+        item["correlation_group"] = str(item["ticker"]).upper()
+    return item
 
 
 class TraderAgent:
@@ -66,35 +74,30 @@ class TraderAgent:
     ) -> dict[str, Any]:
         emit_progress(on_progress, "start", "Starting trading plan generation")
 
-        emit_progress(on_progress, "session", "Loading active household session…")
-        session = store.get_active_session()
-        if not session:
-            raise RuntimeError("No active session. Run scripts/seed_household.py first.")
-
-        emit_progress(on_progress, "analysis", "Loading latest analysis run for plan context…")
-        run = (
-            store.get_analysis_run(analysis_run_id)
-            if analysis_run_id
-            else store.get_latest_analysis_run(session["household_id"])
+        emit_progress(on_progress, "session", "Loading trader context (analysis, portfolio, plans, quotes)…")
+        ctx = build_trader_context(
+            portfolio_id,
+            analysis_run_id=analysis_run_id,
+            history_depth=2,
+            include_full_analysis=True,
+            fetch_quotes=True,
         )
-        if not run or not run.get("payload"):
-            raise RuntimeError("No analysis run available. Run daily analysis first.")
-
+        run = ctx["_raw"]["analysis_run"]
+        nav_state = ctx["_raw"]["nav_state"]
+        prior_plan = ctx["_raw"]["current_plan"]
+        rules = ctx["rules"]
+        timing = ctx["last_plan_timing"]
+        quote_bundle = ctx["market_quotes"]
         stories = run.get("payload") or []
+        new_pos_week = ctx["nav_state"]["new_positions_this_week"]
+        pos_count = len(nav_state.get("positions") or [])
+
         emit_progress(
             on_progress,
             "analysis",
             f"Using analysis_run_id={run['id']} ({len(stories)} stories, run at {run['run_at']})",
             set_stage=False,
         )
-
-        emit_progress(on_progress, "rules", "Loading portfolio trading rules…")
-        rules = store.get_portfolio_rules(portfolio_id, session["rules_json"])
-
-        emit_progress(on_progress, "portfolio", "Computing NAV and open positions…")
-        nav_state = compute_nav(portfolio_id)
-        new_pos_week = store.count_new_positions_this_week(portfolio_id)
-        pos_count = len(nav_state.get("positions") or [])
         emit_progress(
             on_progress,
             "portfolio",
@@ -105,41 +108,20 @@ class TraderAgent:
             ),
             set_stage=False,
         )
-
-        emit_progress(on_progress, "history", "Loading recent trading plans and household decisions…")
-        recent_plans = store.get_recent_weekly_plans_context(portfolio_id, limit=2)
-        prior_plan = store.get_current_weekly_plan(portfolio_id)
-        timing = last_plan_timing_block(
-            plan_at=prior_plan.get("plan_at") if prior_plan else None,
-            based_on_analysis_at=prior_plan.get("based_on_analysis_at") if prior_plan else None,
-            current_analysis_at=run["run_at"],
-            current_analysis_run_id=int(run["id"]),
-            last_analysis_run_id=int(prior_plan["analysis_run_id"])
-            if prior_plan and prior_plan.get("analysis_run_id")
-            else None,
-        )
-        timing_json = json.dumps(timing, indent=2)
-        hist_msg = f"{len(recent_plans)} prior plan(s) for continuity"
-        if timing.get("has_prior_plan"):
-            hist_msg += f" · last plan {timing.get('last_plan_ago_label')}"
-        emit_progress(on_progress, "history", hist_msg, set_stage=False)
-        recent_plans_json = json.dumps(recent_plans, indent=2) if recent_plans else "[]"
-
-        emit_progress(on_progress, "quotes", "Fetching live quotes for analysis tickers…")
-        quote_symbols = collect_symbols_for_quotes(stories, nav_state.get("positions"))
-        quote_bundle = fetch_market_quotes(quote_symbols)
-        quote_bundle = merge_position_marks(quote_bundle, nav_state.get("positions") or [])
         available = sum(1 for q in quote_bundle["quotes"].values() if q.get("available"))
         emit_progress(
             on_progress,
             "quotes",
-            f"{available}/{len(quote_symbols)} quote(s) available (yfinance)",
+            f"{available}/{len(quote_bundle['quotes'])} quote(s) available (yfinance)",
             set_stage=False,
         )
-        quotes_json = format_quotes_for_prompt(quote_bundle)
 
+        prompt_parts = format_context_for_plan_prompt(ctx)
+        timing_json = prompt_parts["timing_json"]
+        recent_plans_json = prompt_parts["recent_plans_json"]
+        quotes_json = prompt_parts["quotes_json"]
+        plan_as_of_iso = prompt_parts["plan_as_of_iso"]
         plan_as_of = datetime.now().date()
-        plan_as_of_iso = plan_as_of.isoformat()
 
         emit_progress(
             on_progress,
@@ -190,6 +172,21 @@ Market quotes (REQUIRED for stock per-share math — same source as Portfolio ma
 
 Trading rules (MUST NOT violate):
 {json.dumps(rules, indent=2)}
+
+Capital tiers & discipline (MANDATORY for buy/sell/trim — enforced in code, not optional):
+- capital_tier numeric + name: 1 Quick Strike, 2 Core Opportunity, 3 Long Conviction, 4 Dry Powder (cash only — never deploy).
+- T1 quick_strike: 15% NAV, max 2 positions, 28-day hold, short horizon.
+- T2 core_opportunity: 55% NAV, max 3 positions, medium horizon.
+- T3 long_conviction: 25% NAV, max 2 positions, long horizon.
+- T4 dry_powder: reserved cash; do not assign capital_tier 4 to trades.
+- conviction_grade: A_plus | A | B_plus | B (B = pass; B+ only on tier 1 with 2/3 persona consensus).
+- sector: required on actionable items (e.g. Technology, Energy).
+- theme_tag / correlation_group: when thematic or same underlying across tiers (e.g. NVDA).
+- Decision priority: (1) address open discipline action items below, (2) profit-taking trims, (3) thesis breaks, (4) new entries only if tier capacity allows, (5) no_changes if nothing qualifies.
+- horizon remains thesis timing (short/medium/long); capital_tier must align (tier 1→short, 2→medium, 3→long).
+
+Tier utilization & open discipline actions:
+{json.dumps(ctx.get("tier_discipline") or dict(), indent=2)}
 
 Recent trading plans and decisions (newest first, up to 2 prior plans; each includes plan_ago_label):
 {recent_plans_json}
@@ -257,6 +254,11 @@ Return valid JSON only:
       "ticker": "SYMBOL or null",
       "instrument_type": "stock|call_option|put_option",
       "horizon": "short|medium|long",
+      "capital_tier": 1,
+      "conviction_grade": "A_plus|A|B_plus|B",
+      "sector": "Technology",
+      "theme_tag": null,
+      "correlation_group": "SYMBOL",
       "expected_exit_months": 4.0,
       "option_contract": {{
         "underlying": "SPY",
@@ -326,7 +328,12 @@ For stocks (not options), omit option_contract and expected_exit_months is optio
             else:
                 item.setdefault("thesis_type", "first_order")
             item = apply_plan_item_coherence(item, plan_as_of)
+            item = _ensure_tier_fields(item)
             items.append(item)
+
+        prior_items = (prior_plan or {}).get("items") or []
+        if prior_items and items:
+            items = apply_carry_forward_persona_consensus(items, prior_items)
         parsed["items"] = items
         no_changes = bool(parsed.get("no_changes") or parsed.get("no_trade_week"))
         parsed["no_changes"] = no_changes
@@ -339,7 +346,6 @@ For stocks (not options), omit option_contract and expected_exit_months is optio
             set_stage=False,
         )
 
-        prior_items = (prior_plan or {}).get("items") or []
         reuse_prior = (
             no_changes
             and not items
@@ -389,5 +395,178 @@ For stocks (not options), omit option_contract and expected_exit_months is optio
             "done",
             f"Saved trading_plan_id={plan_id} · {item_count} item(s). {summary}",
             set_stage=True,
+        )
+        return parsed
+
+    def build_weekly_plan_backtest(
+        self,
+        *,
+        stories: List[dict],
+        nav_state: dict,
+        rules: dict,
+        recent_plans: List[dict],
+        prior_plan: Optional[dict],
+        timing: dict,
+        quote_bundle: dict,
+        plan_as_of: date,
+        analysis_run_at: str,
+        new_pos_week: int = 0,
+        on_progress: Optional[ProgressCallback] = None,
+    ) -> dict[str, Any]:
+        """Synthesize a trading plan without SQLite (historical backtest)."""
+        timing_json = json.dumps(timing, indent=2)
+        recent_plans_json = json.dumps(recent_plans, indent=2) if recent_plans else "[]"
+        quotes_json = format_quotes_for_prompt(quote_bundle)
+        plan_as_of_iso = plan_as_of.isoformat()
+
+        emit_progress(
+            on_progress,
+            "llm",
+            f"Calling trader agent ({self.model}) for backtest plan as-of {plan_as_of_iso}…",
+        )
+
+        max_indirect = getattr(config, "TRADER_MAX_INDIRECT_ITEMS_PER_PLAN", 1)
+        min_conf_buy = getattr(config, "INDIRECT_MIN_CONFIDENCE_FOR_BUY", 6)
+
+        prompt = f"""You are the household trader agent synthesizing an on-demand TRADING PLAN for ONE portfolio.
+
+Plan as-of date (use for all month math): {plan_as_of_iso}
+
+BACKTEST MODE: This is a scheduled weekly simulation. Fresh multi-persona news analysis for this week is below.
+Produce a consolidated plan for this week. Prior plans show items the household already accepted — honor them unless new analysis clearly overrides.
+
+Execution happens manually in Sofi within 24 hours; this is a paper tracking book.
+
+Cadence:
+- Use "Last plan timing" for continuity with prior accepted recommendations.
+- If analysis is materially unchanged from the prior plan AND the book already reflects prior accepted trades, you MAY set no_changes true and items [].
+- Otherwise recommend specific buy/sell/trim line items (not raw analyst lists — you synthesize).
+
+Last plan timing:
+{timing_json}
+
+Context policy (hybrid memory — follow strictly):
+- FRESH evaluation: Use "Latest news analysis" below for current market stories and multi-persona theses only.
+- GROUND TRUTH book: Use "Portfolio state" for cash, positions, and concrete sizing — not assumptions.
+- SHORT household memory: Use "Recent trading plans and decisions" for continuity.
+  * All prior line items in recent plans were ACCEPTED — treat as commitments unless you explicitly reverse with rationale.
+  * Do not repeat rejected recommendations unless the latest analysis clearly overrides the prior thesis.
+
+Portfolio state:
+- Cash: ${nav_state['cash_usd']:.2f} ({nav_state['cash_pct']:.1f}% of NAV)
+- NAV: ${nav_state['nav_usd']:.2f}
+- Positions: {json.dumps(nav_state['positions'], indent=2)}
+- Open option positions: {open_option_count(nav_state['positions'])}
+- New positions opened this week (Pacific): {new_pos_week}
+
+Market quotes (REQUIRED for stock per-share math — historical as-of {plan_as_of_iso}; do NOT invent prices):
+{quotes_json}
+
+Trading rules (MUST NOT violate):
+{json.dumps(rules, indent=2)}
+
+Recent trading plans and decisions (newest first, up to 2 prior plans):
+{recent_plans_json}
+
+Latest news analysis envelopes (multi-persona per story; each may include indirect_effects for macro stories):
+{json.dumps(stories, indent=2)[:120000]}
+
+Indirect / 2nd-order effects (IMPORTANT — keep the plan coherent):
+- Each story may include indirect_effects with causal_chains (hypotheses, not persona trades).
+- You are the ONLY step that may action indirect ideas as plan line items.
+- At most {max_indirect} item(s) in the entire plan may have thesis_type "indirect".
+- For thesis_type "indirect", only include buy/sell/trim (not hold) when ALL hold:
+  * Top ticker confidence >= {min_conf_buy}
+  * liquidity_ok is true for that chain
+  * already_priced_risk is not "high"
+- Prefer first-order items from analyst personas; skip crowded indirect trades.
+
+Produce ONE consolidated trading plan respecting rules:
+- max {rules['max_position_pct_nav']}% NAV per position
+- max {rules['max_new_positions_per_week']} NEW positions per week (already used: {new_pos_week})
+- min {rules['cash_floor_pct']}% cash floor
+- max {rules['max_open_option_positions']} open option positions at once
+
+Sizing (REQUIRED for every item except watch/hold with no trade):
+- Use concrete dollar amounts from market_quotes and portfolio state.
+- For STOCKS: use ONLY market_quotes[SYMBOL].price_usd for per-share math.
+
+Return valid JSON only:
+{{
+  "summary": "2-4 sentences",
+  "no_changes": false,
+  "based_on_analysis_at": "{analysis_run_at}",
+  "items": [
+    {{
+      "priority": 1,
+      "thesis_type": "first_order|indirect",
+      "action": "buy|sell|trim|hedge|hold|watch",
+      "ticker": "SYMBOL or null",
+      "instrument_type": "stock|call_option|put_option",
+      "horizon": "short|medium|long",
+      "expected_exit_months": 4.0,
+      "sizing": {{
+        "notional_usd": 330.0,
+        "quantity": 2,
+        "quantity_unit": "shares|contracts",
+        "pct_nav": 12.5,
+        "pct_cash": 33.0,
+        "pct_position": null,
+        "summary": "Buy ~$330 (2 shares @ ~$165); ~33% of cash"
+      }},
+      "persona_consensus": {{"aggressive": true, "moderate": false, "minimal_risk": false}},
+      "rationale": "...",
+      "rule_warnings": []
+    }}
+  ]
+}}
+Limit items to at most 8. Prefer liquid US names. Default thesis_type to "first_order"."""
+
+        text = self._message_create(prompt)
+        emit_progress(on_progress, "parse", "Parsing trader agent JSON response…")
+        parsed = self._parser._parse_json_object(text)
+        parsed["based_on_analysis_at"] = analysis_run_at
+        parsed["generated_at"] = analysis_run_at
+        parsed["market_quotes"] = quote_bundle
+
+        price_map = quotes_price_map(quote_bundle)
+        items = []
+        indirect_count = 0
+        for raw in parsed.get("items") or []:
+            item = normalize_plan_item_sizing(dict(raw))
+            sym = (item.get("ticker") or "").strip().upper()
+            live = price_map.get(sym)
+            if live:
+                item = reconcile_stock_sizing_with_quote(item, live, nav_state)
+                item = normalize_plan_item_sizing(item)
+            if (item.get("thesis_type") or "first_order").strip().lower() == "indirect":
+                if indirect_count >= max_indirect:
+                    item["thesis_type"] = "first_order"
+                else:
+                    indirect_count += 1
+            else:
+                item.setdefault("thesis_type", "first_order")
+            item = apply_plan_item_coherence(item, plan_as_of)
+            item = _ensure_tier_fields(item)
+            items.append(item)
+
+        prior_items = (prior_plan or {}).get("items") or []
+        if prior_items and items:
+            items = apply_carry_forward_persona_consensus(items, prior_items)
+        parsed["items"] = items
+        no_changes = bool(parsed.get("no_changes") or parsed.get("no_trade_week"))
+        parsed["no_changes"] = no_changes
+        parsed["last_plan_timing"] = timing
+
+        if no_changes and not items and prior_plan and (prior_plan.get("items") or []):
+            parsed["items"] = list(prior_plan["items"])
+            parsed["carried_forward"] = True
+
+        emit_progress(
+            on_progress,
+            "parse",
+            f"Plan: {len(parsed['items'])} item(s)"
+            + (" · no changes (carried forward)" if parsed.get("carried_forward") else ""),
+            set_stage=False,
         )
         return parsed
