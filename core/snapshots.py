@@ -25,6 +25,12 @@ def save_snapshot(portfolio_id: int) -> dict[str, Any]:
                 state["nav_usd"],
             ),
         )
+    try:
+        from core.benchmarks import snapshot_benchmark_closes
+
+        snapshot_benchmark_closes()
+    except Exception:
+        pass
     return {"portfolio_id": portfolio_id, "as_of": as_of, **state}
 
 

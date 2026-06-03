@@ -295,6 +295,15 @@ CREATE TABLE IF NOT EXISTS tier_transfer_suggestions (
     action_item_id INTEGER REFERENCES action_items(id),
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS benchmark_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    as_of_date TEXT NOT NULL,
+    close_usd REAL NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(symbol, as_of_date)
+);
 """
 
 
@@ -316,12 +325,28 @@ def _migrate_tier_tables(conn: sqlite3.Connection) -> None:
     conn.executescript(_TIER_TABLES_SQL)
 
 
+def _migrate_benchmark_snapshots(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS benchmark_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            as_of_date TEXT NOT NULL,
+            close_usd REAL NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(symbol, as_of_date)
+        )
+        """
+    )
+
+
 def init_db() -> None:
     with db_session() as conn:
         conn.executescript(_SCHEMA)
         _migrate_plan_item_sizing(conn)
         _migrate_plan_item_tier_columns(conn)
         _migrate_tier_tables(conn)
+        _migrate_benchmark_snapshots(conn)
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:

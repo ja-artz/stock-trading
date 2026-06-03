@@ -248,3 +248,74 @@ export type PlanRevisionPreview = {
   warnings?: string[];
   ok: boolean;
 };
+
+export type InsightsPeriod = "7d" | "30d" | "90d" | "ytd" | "all";
+
+export type InsightsChartPoint = {
+  label: string;
+  portfolio: number;
+  spy?: number;
+};
+
+export type InsightsClosedTrade = {
+  id: number;
+  date: string;
+  ticker: string;
+  instrument_type: string;
+  entry_price: number;
+  exit_price: number;
+  quantity: number;
+  hold_days: number;
+  realized_pnl: number;
+  pnl_pct: number;
+  followed_rec: boolean;
+};
+
+export type InsightsPerformance = {
+  portfolio_id: number;
+  period: InsightsPeriod;
+  period_start: string | null;
+  period_end: string;
+  initial_cash: number | null;
+  chart: InsightsChartPoint[];
+  benchmarks_available: boolean;
+  benchmark_symbol: string;
+  chart_baseline_date?: string | null;
+  chart_mode?: "since_first_nav" | "period" | "empty";
+  first_nav_date?: string | null;
+  nav_history_days?: number;
+  chart_effective_start?: string | null;
+  days_until_period_chart?: number;
+  summary: {
+    total_return_pct: number | null;
+    total_return_usd: number | null;
+    vs_spy_pct: number | null;
+    spy_period_return_pct?: number | null;
+    spy_since_prev_close_pct?: number | null;
+    spy_last_2_sessions_pct?: number | null;
+    win_rate_pct: number | null;
+    wins: number;
+    losses: number;
+    avg_hold_days: number | null;
+    closed_trade_count: number;
+  };
+  closed_trades: InsightsClosedTrade[];
+};
+
+export type InsightsPersonaRow = {
+  persona: string;
+  label: string;
+  stance_agreements: number;
+  matched_trades: number;
+  win_rate_pct: number | null;
+  avg_return_pct: number | null;
+  best_trade: string | null;
+};
+
+export type InsightsPersonas = {
+  portfolio_id: number;
+  period: InsightsPeriod;
+  period_start: string | null;
+  period_end: string;
+  personas: InsightsPersonaRow[];
+};
