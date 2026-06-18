@@ -27,23 +27,58 @@ def _get_rules_for_portfolio(portfolio_id: int) -> dict:
         return store.get_portfolio_rules(portfolio_id, row["rules_json"])
 
 
-def _compute_within_24h(weekly_plan_id: Optional[int], logged_at: Optional[str]) -> Optional[bool]:
-    if not weekly_plan_id:
-        return None
+def _parse_utc(ts: str) -> datetime:
+    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _compute_within_24h(
+    portfolio_id: int,
+    *,
+    plan_item_id: Optional[int] = None,
+    weekly_plan_id: Optional[int] = None,
+    logged_at: Optional[str] = None,
+) -> Optional[bool]:
+    """True when trade logged within trade_commit_hours of plan-item acceptance."""
+    rules = _get_rules_for_portfolio(portfolio_id)
+    commit_hours = float(rules.get("trade_commit_hours", 24))
+
+    anchor: Optional[datetime] = None
     with db_session() as conn:
-        plan = conn.execute(
-            "SELECT plan_at FROM weekly_plans WHERE id = ?",
-            (weekly_plan_id,),
-        ).fetchone()
-        if not plan:
-            return None
-        plan_at = datetime.fromisoformat(plan["plan_at"].replace("Z", "+00:00"))
-        trade_at = datetime.fromisoformat((logged_at or store.utc_now_iso()).replace("Z", "+00:00"))
-        if plan_at.tzinfo is None:
-            plan_at = plan_at.replace(tzinfo=timezone.utc)
-        if trade_at.tzinfo is None:
-            trade_at = trade_at.replace(tzinfo=timezone.utc)
-        return (trade_at - plan_at).total_seconds() / 3600.0 <= 24.0
+        if plan_item_id:
+            row = conn.execute(
+                """
+                SELECT d.decided_at FROM decisions d
+                WHERE d.plan_item_id = ? AND d.decision = 'accepted'
+                ORDER BY d.decided_at DESC LIMIT 1
+                """,
+                (plan_item_id,),
+            ).fetchone()
+            if row and row["decided_at"]:
+                anchor = _parse_utc(row["decided_at"])
+            if weekly_plan_id is None:
+                wp = conn.execute(
+                    "SELECT weekly_plan_id FROM plan_items WHERE id = ?",
+                    (plan_item_id,),
+                ).fetchone()
+                if wp:
+                    weekly_plan_id = int(wp["weekly_plan_id"])
+
+        if anchor is None and weekly_plan_id:
+            plan = conn.execute(
+                "SELECT plan_at FROM weekly_plans WHERE id = ?",
+                (weekly_plan_id,),
+            ).fetchone()
+            if plan and plan["plan_at"]:
+                anchor = _parse_utc(plan["plan_at"])
+
+    if anchor is None:
+        return None
+
+    trade_at = _parse_utc(logged_at or store.utc_now_iso())
+    return (trade_at - anchor).total_seconds() / 3600.0 <= commit_hours
 
 
 def log_trade(
@@ -91,7 +126,26 @@ def log_trade(
             "violations": [{"code": v.code, "message": v.message, "severity": v.severity} for v in violations],
         }
 
-    executed_within_24h = _compute_within_24h(weekly_plan_id, logged_at)
+    if not plan_item_id:
+        from core.plan_linking import infer_plan_item_id_for_trade
+
+        plan_item_id = infer_plan_item_id_for_trade(
+            portfolio_id, side=side, ticker=ticker
+        )
+
+    if plan_item_id and not weekly_plan_id:
+        from core.plan_execution import get_plan_item
+
+        linked = get_plan_item(plan_item_id)
+        if linked:
+            weekly_plan_id = linked.get("weekly_plan_id")
+
+    executed_within_24h = _compute_within_24h(
+        portfolio_id,
+        plan_item_id=plan_item_id,
+        weekly_plan_id=weekly_plan_id,
+        logged_at=logged_at,
+    )
     ts = logged_at or store.utc_now_iso()
 
     with db_session() as conn:
@@ -161,5 +215,62 @@ def log_trade(
         "ok": True,
         "ledger_event_id": event_id,
         "violations": [{"code": v.code, "message": v.message, "severity": v.severity} for v in violations],
+        "snapshot": snap,
+    }
+
+
+def deposit_cash(
+    portfolio_id: int,
+    amount_usd: float,
+    *,
+    note: Optional[str] = None,
+    logged_at: Optional[str] = None,
+) -> dict[str, Any]:
+    """Record external cash added to the Sofi account (increases book cash and NAV)."""
+    if amount_usd <= 0:
+        return {"ok": False, "reason": "amount_usd must be positive"}
+
+    ts = logged_at or store.utc_now_iso()
+    with db_session() as conn:
+        port = conn.execute("SELECT session_id FROM portfolios WHERE id = ?", (portfolio_id,)).fetchone()
+        if not port:
+            return {"ok": False, "reason": f"Portfolio {portfolio_id} not found"}
+
+        cur = conn.execute(
+            """
+            INSERT INTO ledger_events
+            (portfolio_id, event_type, side, ticker, instrument_type, quantity, price, fees,
+             logged_at, note)
+            VALUES (?, 'cash_deposit', 'in', 'CASH', 'cash', ?, 1, 0, ?, ?)
+            """,
+            (portfolio_id, amount_usd, ts, note),
+        )
+        event_id = int(cur.lastrowid)
+        session = conn.execute(
+            "SELECT household_id FROM sessions WHERE id = ?",
+            (port["session_id"],),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO timeline_events (household_id, portfolio_id, event_type, title, detail_json, occurred_at)
+            VALUES (?, ?, 'cash_deposit', ?, ?, ?)
+            """,
+            (
+                session["household_id"],
+                portfolio_id,
+                f"Cash deposit ${amount_usd:.2f}",
+                json.dumps({"ledger_event_id": event_id, "amount_usd": amount_usd}),
+                ts,
+            ),
+        )
+
+    snap = save_snapshot(portfolio_id)
+    state = compute_nav(portfolio_id)
+    return {
+        "ok": True,
+        "ledger_event_id": event_id,
+        "amount_usd": round(amount_usd, 2),
+        "cash_usd": state["cash_usd"],
+        "nav_usd": state["nav_usd"],
         "snapshot": snap,
     }

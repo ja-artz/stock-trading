@@ -3,6 +3,7 @@
 from datetime import date
 
 from core.rules import DEFAULT_RULES
+from core.tier_config import resolve_capital_tier_for_plan_item
 from core.tier_engine import (
     ProposedEntry,
     build_tier_state,
@@ -83,3 +84,36 @@ def test_triage_passes_on_b_conviction():
 
 def test_pl_pct():
     assert abs(pl_pct(100, 125) - 25.0) < 0.01
+
+
+def test_resolve_capital_tier_from_horizon_when_column_missing():
+    assert resolve_capital_tier_for_plan_item({"horizon": "short"}) == 1
+    assert resolve_capital_tier_for_plan_item({"capital_tier": 3, "horizon": "short"}) == 3
+
+
+def test_tier_state_counts_unique_positions_and_prorates_lots():
+    rules = dict(DEFAULT_RULES)
+    lots = [
+        {
+            "ticker": "SPY",
+            "instrument_type": "stock",
+            "capital_tier": 2,
+            "market_value": 120.0,
+        },
+        {
+            "ticker": "SPY",
+            "instrument_type": "stock",
+            "capital_tier": 2,
+            "market_value": 115.0,
+        },
+        {
+            "ticker": "ITB",
+            "instrument_type": "stock",
+            "capital_tier": 2,
+            "market_value": 190.0,
+        },
+    ]
+    state = build_tier_state(nav_usd=1000, cash_usd=200, lots=lots, rules=rules)
+    bucket = state.buckets[2]
+    assert bucket.position_count == 2
+    assert abs(bucket.deployed_usd - 425.0) < 0.01

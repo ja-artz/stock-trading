@@ -269,6 +269,9 @@ export type InsightsClosedTrade = {
   realized_pnl: number;
   pnl_pct: number;
   followed_rec: boolean;
+  plan_item_id?: number | null;
+  matched_personas?: string[];
+  persona_consensus?: Record<string, boolean> | null;
 };
 
 export type InsightsPerformance = {
@@ -307,6 +310,7 @@ export type InsightsPersonaRow = {
   label: string;
   stance_agreements: number;
   matched_trades: number;
+  active_positions: number;
   win_rate_pct: number | null;
   avg_return_pct: number | null;
   best_trade: string | null;

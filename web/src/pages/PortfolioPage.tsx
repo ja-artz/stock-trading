@@ -5,7 +5,7 @@ import { api, type ActionItem, type DisciplineSummary } from "@/api/client";
 import { TierLegendBlock } from "@/components/TierBadge";
 import { getTierDefinition } from "@/lib/tierLabels";
 import { ImportPositionsDialog } from "@/components/portfolio/ImportPositionsDialog";
-import { LogTradeDialog } from "@/components/portfolio/TradeDialogs";
+import { AddCashDialog, LogTradeDialog } from "@/components/portfolio/TradeDialogs";
 import {
   formatInstrumentType,
   formatSignedPct,
@@ -79,6 +79,7 @@ export function PortfolioPage() {
             initialCash={data.initial_cash ?? 1000}
             onSaved={load}
           />
+          <AddCashDialog portfolioId={data.portfolio.id} onSaved={load} />
           <LogTradeDialog portfolioId={data.portfolio.id} onSaved={load} />
         </div>
       </div>

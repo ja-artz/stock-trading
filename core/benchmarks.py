@@ -2,18 +2,51 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Sequence
+from zoneinfo import ZoneInfo
 
 from core.db import db_session
-from core.pricing import close_on_or_before, get_daily_close_series, get_last_price
+from core.pricing import get_daily_close_series, get_last_price
 
 # Household-wide symbols; not tied to portfolio_id (multi-portfolio safe).
 DEFAULT_BENCHMARK_SYMBOLS: tuple[str, ...] = ("SPY",)
 
 
-def _utc_today() -> date:
-    return datetime.now(timezone.utc).date()
+def _market_today() -> date:
+    """US/Eastern calendar date for benchmark session labeling."""
+    return datetime.now(ZoneInfo("America/New_York")).date()
+
+
+def _refresh_recent_closes(
+    closes: Dict[date, float],
+    symbol: str,
+    start: date,
+    end: date,
+) -> Dict[date, float]:
+    """Replace stale stored snapshots with recent yfinance daily closes."""
+    fetch_end = max(end, _market_today())
+    hist_start = max(start, fetch_end - timedelta(days=14))
+    hist = get_daily_close_series(symbol.upper(), hist_start, fetch_end)
+    for session_day, px in hist.items():
+        if session_day >= start:
+            closes[session_day] = px
+    return hist
+
+
+def _session_for_live_quote(end: date, hist: Dict[date, float]) -> Optional[date]:
+    """
+    Session date to stamp with the latest quote.
+    Uses US market calendar so live SPY aligns with chart/NAV trading days
+    (UTC midnight can roll ahead of the still-open or just-closed US session).
+    """
+    market_today = _market_today()
+    latest_hist = max(hist) if hist else None
+    if end >= market_today:
+        return market_today
+    if latest_hist is not None and end >= latest_hist:
+        return latest_hist
+    return None
 
 
 def upsert_benchmark_close(symbol: str, as_of_date: date, close_usd: float) -> None:
@@ -35,18 +68,22 @@ def snapshot_benchmark_closes(
     as_of: Optional[date] = None,
     symbols: Sequence[str] = DEFAULT_BENCHMARK_SYMBOLS,
 ) -> List[dict]:
-    """Fetch and persist closes for the given calendar day (default today UTC)."""
-    day = as_of or _utc_today()
+    """Fetch and persist closes for the current US market session (default)."""
+    day = as_of or _market_today()
     written: List[dict] = []
     for sym in symbols:
-        series = get_daily_close_series(sym, day, day)
-        price = close_on_or_before(series, day)
-        if price is None and series:
-            price = series[max(series)]
+        sym_u = sym.upper()
+        live = get_last_price(sym_u)
+        if live is not None and live > 0:
+            upsert_benchmark_close(sym_u, day, live)
+            written.append({"symbol": sym_u, "as_of_date": day.isoformat(), "close_usd": live})
+            continue
+        series = get_daily_close_series(sym_u, day - timedelta(days=7), day)
+        price = series.get(day)
         if price is None or price <= 0:
             continue
-        upsert_benchmark_close(sym, day, price)
-        written.append({"symbol": sym.upper(), "as_of_date": day.isoformat(), "close_usd": price})
+        upsert_benchmark_close(sym_u, day, price)
+        written.append({"symbol": sym_u, "as_of_date": day.isoformat(), "close_usd": price})
     return written
 
 
@@ -108,13 +145,15 @@ def get_benchmark_closes_with_live(
     start: date,
     end: date,
 ) -> Dict[date, float]:
-    """Stored daily closes; today's point uses latest yfinance price when end is today."""
-    closes = dict(get_benchmark_closes(symbol, start, end))
-    today = _utc_today()
-    if end >= today:
-        live = get_last_price(symbol.upper())
+    """Stored daily closes refreshed from yfinance; current session uses live quote."""
+    sym = symbol.upper()
+    closes = dict(get_benchmark_closes(sym, start, end))
+    hist = _refresh_recent_closes(closes, sym, start, end)
+    session = _session_for_live_quote(end, hist)
+    if session is not None:
+        live = get_last_price(sym)
         if live and live > 0:
-            closes[today] = float(live)
+            closes[session] = float(live)
     return closes
 
 

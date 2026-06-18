@@ -15,7 +15,8 @@ from core.benchmarks import (
     snapshot_benchmark_closes,
 )
 from core.db import db_session, row_to_dict
-from core.plan_consensus import PERSONA_KEYS, normalize_persona_consensus
+from core.plan_consensus import PERSONA_KEYS, normalize_persona_consensus, personas_matching_stance
+from core.plan_linking import accepted_plans_by_ticker, resolve_trade_attribution
 from core.portfolio import compute_nav
 from core.pricing import close_on_or_before
 from core.portfolio_nav_history import daily_nav_for_period
@@ -100,13 +101,6 @@ def _load_plan_item_meta(plan_item_ids: List[int]) -> Dict[int, dict]:
     return out
 
 
-def _personas_matching_stance(consensus: Optional[dict]) -> List[str]:
-    c = normalize_persona_consensus(consensus)
-    if not c:
-        return []
-    return [k for k in PERSONA_KEYS if c.get(k)]
-
-
 def closed_trades_from_ledger(
     portfolio_id: int,
     *,
@@ -155,6 +149,7 @@ def closed_trades_from_ledger(
         elif side == "sell":
             remaining = qty
             sell_id = int(ev["id"])
+            sell_plan_item_id = int(plan_item_id) if plan_item_id else None
             while remaining > 1e-9 and open_lots[key]:
                 lot = open_lots[key][0]
                 take = min(lot.quantity, remaining)
@@ -177,6 +172,7 @@ def closed_trades_from_ledger(
                             "realized_pnl": round(realized, 2),
                             "pnl_pct": round(pnl_pct, 2),
                             "plan_item_id": lot.plan_item_id,
+                            "sell_plan_item_id": sell_plan_item_id,
                         }
                     )
                 lot.quantity -= take
@@ -184,14 +180,28 @@ def closed_trades_from_ledger(
                 if lot.quantity <= 1e-9:
                     open_lots[key].pop(0)
 
-    meta = _load_plan_item_meta(list(set(plan_ids)))
+    entry_plans = accepted_plans_by_ticker(portfolio_id, actions=("buy", "hedge"))
+    any_plans = accepted_plans_by_ticker(portfolio_id)
+    extra_ids = [p["plan_item_id"] for p in entry_plans.values()]
+    extra_ids += [p["plan_item_id"] for p in any_plans.values()]
+    meta = _load_plan_item_meta(list(set(plan_ids + extra_ids)))
+
     for trade in closed:
-        pid = trade.pop("plan_item_id", None)
-        info = meta.get(pid) if pid else None
-        consensus = info.get("persona_consensus") if info else None
-        last_decision = (info or {}).get("last_decision")
-        trade["followed_rec"] = bool(pid and last_decision == "accepted")
-        trade["matched_personas"] = _personas_matching_stance(consensus) if pid else []
+        buy_pid = trade.pop("plan_item_id", None)
+        sell_pid = trade.pop("sell_plan_item_id", None)
+        attr = resolve_trade_attribution(
+            portfolio_id,
+            trade["ticker"],
+            buy_plan_item_id=buy_pid,
+            sell_plan_item_id=sell_pid,
+            plan_meta=meta,
+            entry_plans=entry_plans,
+            any_plans=any_plans,
+        )
+        trade["plan_item_id"] = attr["plan_item_id"]
+        trade["matched_personas"] = attr["matched_personas"]
+        trade["followed_rec"] = attr["followed_rec"]
+        trade["persona_consensus"] = attr["persona_consensus"]
 
     closed.sort(key=lambda t: t["date"], reverse=True)
     return closed
@@ -437,14 +447,80 @@ def build_performance_insights(portfolio_id: int, period: str = "30d") -> dict[s
     }
 
 
+def _open_positions_by_persona(portfolio_id: int) -> Dict[str, List[dict]]:
+    from core.position_lots import enrich_lots_with_marks, get_open_lots
+
+    lots = enrich_lots_with_marks(portfolio_id, get_open_lots(portfolio_id))
+    entry_plans = accepted_plans_by_ticker(portfolio_id, actions=("buy", "hedge"))
+    any_plans = accepted_plans_by_ticker(portfolio_id)
+    plan_ids = [int(l["plan_item_id"]) for l in lots if l.get("plan_item_id")]
+    plan_ids += [p["plan_item_id"] for p in entry_plans.values()]
+    plan_ids += [p["plan_item_id"] for p in any_plans.values()]
+    meta = _load_plan_item_meta(list(set(plan_ids)))
+
+    # Aggregate lots to one row per ticker before persona attribution.
+    by_ticker: Dict[str, dict] = {}
+    for lot in lots:
+        ticker = (lot.get("ticker") or "").upper()
+        if not ticker:
+            continue
+        qty = float(lot.get("quantity_remaining") or 0)
+        entry = float(lot.get("entry_price") or 0)
+        mv = float(lot.get("market_value") or 0)
+        cost = qty * entry
+        if ticker not in by_ticker:
+            by_ticker[ticker] = {
+                "ticker": ticker,
+                "plan_item_id": lot.get("plan_item_id"),
+                "cost": 0.0,
+                "mv": 0.0,
+            }
+        row = by_ticker[ticker]
+        row["cost"] += cost
+        row["mv"] += mv
+        if lot.get("plan_item_id") and not row.get("plan_item_id"):
+            row["plan_item_id"] = lot.get("plan_item_id")
+
+    by_persona: Dict[str, List[dict]] = {k: [] for k in PERSONA_KEYS}
+    for ticker, agg in by_ticker.items():
+        attr = resolve_trade_attribution(
+            portfolio_id,
+            ticker,
+            buy_plan_item_id=agg.get("plan_item_id"),
+            plan_meta=meta,
+            entry_plans=entry_plans,
+            any_plans=any_plans,
+        )
+        if not attr["matched_personas"]:
+            continue
+        cost = float(agg["cost"])
+        mv = float(agg["mv"])
+        pnl = round(mv - cost, 2)
+        pnl_pct = round(pnl / cost * 100.0, 2) if cost > 0 else 0.0
+        row = {"ticker": ticker, "unrealized_pnl": pnl, "pnl_pct": pnl_pct}
+        for persona in attr["matched_personas"]:
+            by_persona[persona].append(row)
+    return by_persona
+
+
 def build_persona_insights(portfolio_id: int, period: str = "30d") -> dict[str, Any]:
     period_start, period_end = parse_period(period)
     closed = closed_trades_from_ledger(
         portfolio_id, period_start=period_start, period_end=period_end
     )
+    open_by_persona = _open_positions_by_persona(portfolio_id)
 
     stats: Dict[str, dict] = {
-        k: {"matched_trades": 0, "wins": 0, "return_pcts": [], "best": None}
+        k: {
+            "matched_trades": 0,
+            "wins": 0,
+            "return_pcts": [],
+            "best": None,
+            "active_positions": 0,
+            "open_wins": 0,
+            "open_return_pcts": [],
+            "open_best": None,
+        }
         for k in PERSONA_KEYS
     }
 
@@ -458,6 +534,17 @@ def build_persona_insights(portfolio_id: int, period: str = "30d") -> dict[str, 
             label = f"{trade['ticker']} {trade['pnl_pct']:+.1f}%"
             if s["best"] is None or trade["pnl_pct"] > s["best"][1]:
                 s["best"] = (label, trade["pnl_pct"])
+
+    for persona, rows in open_by_persona.items():
+        s = stats[persona]
+        s["active_positions"] = len(rows)
+        for row in rows:
+            if row["unrealized_pnl"] > 0:
+                s["open_wins"] += 1
+            s["open_return_pcts"].append(row["pnl_pct"])
+            label = f"{row['ticker']} {row['pnl_pct']:+.1f}%"
+            if s["open_best"] is None or row["pnl_pct"] > s["open_best"][1]:
+                s["open_best"] = (label, row["pnl_pct"])
 
     stance_counts: Dict[str, int] = {k: 0 for k in PERSONA_KEYS}
     with db_session() as conn:
@@ -480,23 +567,44 @@ def build_persona_insights(portfolio_id: int, period: str = "30d") -> dict[str, 
                 raw = json.loads(raw)
             except json.JSONDecodeError:
                 raw = None
-        for persona in _personas_matching_stance(raw):
+        for persona in personas_matching_stance(raw):
             stance_counts[persona] += 1
 
     personas_out: List[dict] = []
     for key in PERSONA_KEYS:
         s = stats[key]
-        n = s["matched_trades"]
-        rets = s["return_pcts"]
+        n_closed = s["matched_trades"]
+        n_open = s["active_positions"]
+        closed_rets = s["return_pcts"]
+        open_rets = s["open_return_pcts"]
+        all_rets = closed_rets + open_rets
+        total_wins = s["wins"] + s["open_wins"]
+        total_n = n_closed + n_open
+
+        if n_closed:
+            win_rate = round(s["wins"] / n_closed * 100, 1)
+        elif n_open:
+            win_rate = round(s["open_wins"] / n_open * 100, 1)
+        else:
+            win_rate = None
+
+        if s["best"] and (not s["open_best"] or s["best"][1] >= s["open_best"][1]):
+            best_trade = s["best"][0]
+        elif s["open_best"]:
+            best_trade = s["open_best"][0]
+        else:
+            best_trade = None
+
         personas_out.append(
             {
                 "persona": key,
                 "label": PERSONA_LABELS.get(key, key),
                 "stance_agreements": stance_counts[key],
-                "matched_trades": n,
-                "win_rate_pct": round(s["wins"] / n * 100, 1) if n else None,
-                "avg_return_pct": round(sum(rets) / len(rets), 2) if rets else None,
-                "best_trade": s["best"][0] if s["best"] else None,
+                "matched_trades": n_closed,
+                "active_positions": n_open,
+                "win_rate_pct": win_rate,
+                "avg_return_pct": round(sum(all_rets) / len(all_rets), 2) if all_rets else None,
+                "best_trade": best_trade,
             }
         )
 

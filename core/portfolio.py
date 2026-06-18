@@ -34,6 +34,13 @@ def compute_positions_from_ledger(portfolio_id: int) -> Tuple[float, List[dict]]
     holdings: Dict[str, dict] = {}
     for row in rows:
         ev = row_to_dict(row)
+        event_type = (ev.get("event_type") or "trade").lower()
+        if event_type == "cash_deposit":
+            cash += float(ev["quantity"])
+            continue
+        if event_type != "trade":
+            continue
+
         side = ev["side"].lower()
         ticker = ev["ticker"].upper()
         qty = float(ev["quantity"])

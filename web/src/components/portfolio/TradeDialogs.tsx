@@ -20,7 +20,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { DollarSign, Plus } from "lucide-react";
+import { AlertTriangle, DollarSign, Plus, Wallet } from "lucide-react";
 import type { PositionRow } from "@/lib/positionMetrics";
 
 export function LogTradeDialog({
@@ -49,6 +49,7 @@ export function LogTradeDialog({
     note: "",
   });
   const [err, setErr] = useState("");
+  const [warnings, setWarnings] = useState<string[]>([]);
   const isOption = form.instrument_type.includes("option");
 
   const resetForm = () => {
@@ -62,11 +63,13 @@ export function LogTradeDialog({
       note: "",
     });
     setErr("");
+    setWarnings([]);
   };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr("");
+    setWarnings([]);
     try {
       const res = await api.post<{ ok: boolean; violations?: { message: string }[] }>("/trades", {
         portfolio_id: portfolioId,
@@ -82,6 +85,10 @@ export function LogTradeDialog({
         setErr(res.violations?.map((v) => v.message).join("; ") || "Trade rejected");
         return;
       }
+      const ruleWarnings = res.violations?.map((v) => v.message).filter(Boolean) ?? [];
+      if (ruleWarnings.length > 0) {
+        setWarnings(ruleWarnings);
+      }
       setOpen(false);
       resetForm();
       onSaved();
@@ -91,6 +98,7 @@ export function LogTradeDialog({
   };
 
   return (
+    <>
     <Dialog
       open={open}
       onOpenChange={(v) => {
@@ -118,7 +126,8 @@ export function LogTradeDialog({
         <DialogHeader>
           <DialogTitle>Log Trade</DialogTitle>
           <DialogDescription>
-            {description ?? "Record a trade you executed in Sofi."}
+            {description ??
+              "Record a trade you executed in Sofi. Trading rules guide recommendations but do not block logging."}
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={submit} className="space-y-4">
@@ -213,6 +222,124 @@ export function LogTradeDialog({
               <DollarSign className="w-4 h-4 mr-2" />
               Log Trade
             </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+    {warnings.length > 0 && (
+      <div className="fixed bottom-4 right-4 max-w-md rounded-lg border border-amber-200 bg-amber-50 p-4 shadow-lg z-50">
+        <p className="text-sm font-medium text-amber-900 flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 shrink-0" />
+          Trade logged with rule warnings
+        </p>
+        <ul className="mt-2 text-sm text-amber-800 list-disc pl-5 space-y-1">
+          {warnings.map((w) => (
+            <li key={w}>{w}</li>
+          ))}
+        </ul>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="mt-3"
+          onClick={() => setWarnings([])}
+        >
+          Dismiss
+        </Button>
+      </div>
+    )}
+    </>
+  );
+}
+
+export function AddCashDialog({
+  portfolioId,
+  onSaved,
+}: {
+  portfolioId: number;
+  onSaved: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [amount, setAmount] = useState("");
+  const [note, setNote] = useState("");
+  const [err, setErr] = useState("");
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErr("");
+    const parsed = parseFloat(amount);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setErr("Enter a positive dollar amount");
+      return;
+    }
+    try {
+      await api.post("/portfolio/cash-deposit", {
+        portfolio_id: portfolioId,
+        amount_usd: parsed,
+        note: note.trim() || undefined,
+      });
+      setOpen(false);
+      setAmount("");
+      setNote("");
+      onSaved();
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        setOpen(v);
+        if (!v) {
+          setAmount("");
+          setNote("");
+          setErr("");
+        }
+      }}
+    >
+      <DialogTrigger asChild>
+        <Button variant="outline">
+          <Wallet className="w-4 h-4 mr-2" />
+          Add Cash
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Add cash</DialogTitle>
+          <DialogDescription>
+            Record money you transferred into your Sofi account. This increases cash and NAV in the paper book.
+          </DialogDescription>
+        </DialogHeader>
+        <form onSubmit={submit} className="space-y-4">
+          <div>
+            <Label>Amount (USD)</Label>
+            <Input
+              type="number"
+              step="any"
+              min="0"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="500.00"
+              required
+            />
+          </div>
+          <div>
+            <Label>Note (optional)</Label>
+            <Textarea
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              rows={2}
+              placeholder="Monthly contribution…"
+            />
+          </div>
+          {err && <p className="text-sm text-red-600">{err}</p>}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="submit">Add cash</Button>
           </DialogFooter>
         </form>
       </DialogContent>

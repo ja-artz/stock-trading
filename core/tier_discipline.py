@@ -52,7 +52,7 @@ def run_daily_discipline(
     today = as_of or date.today()
     generated_at = store.utc_now_iso()
     rules = _rules_for_portfolio(portfolio_id)
-    lots = enrich_lots_with_marks(portfolio_id, get_open_lots(portfolio_id))
+    lots = _lots_with_unmapped_holdings(portfolio_id)
 
     from core.position_lots import count_tier1_opens_this_month
 
@@ -233,12 +233,42 @@ def update_action_item_status(
     return _action_item_dict(updated)
 
 
+def _lots_with_unmapped_holdings(portfolio_id: int) -> List[dict]:
+    from core.position_lots import (
+        enrich_lots_with_marks,
+        get_open_lots,
+        get_unmapped_positions,
+        sync_lot_tiers_from_plans,
+        tier_for_ticker_from_plans,
+    )
+
+    sync_lot_tiers_from_plans(portfolio_id)
+    lots = enrich_lots_with_marks(portfolio_id, get_open_lots(portfolio_id))
+    lot_keys = {(l["ticker"], l.get("instrument_type", "stock")) for l in lots}
+    for p in get_unmapped_positions(portfolio_id):
+        key = (p["ticker"], p.get("instrument_type", "stock"))
+        if key in lot_keys:
+            continue
+        lots.append(
+            {
+                "ticker": p["ticker"],
+                "instrument_type": p.get("instrument_type", "stock"),
+                "capital_tier": tier_for_ticker_from_plans(
+                    portfolio_id, p["ticker"]
+                ),
+                "market_value": p.get("market_value"),
+                "mark_price": p.get("mark_price"),
+            }
+        )
+    return lots
+
+
 def get_discipline_summary(portfolio_id: int) -> dict[str, Any]:
     from core.position_lots import count_tier1_opens_this_month, get_unmapped_positions
 
     rules = _rules_for_portfolio(portfolio_id)
     nav = compute_nav(portfolio_id)
-    lots = enrich_lots_with_marks(portfolio_id, get_open_lots(portfolio_id))
+    lots = _lots_with_unmapped_holdings(portfolio_id)
     state = build_tier_state(
         nav_usd=nav["nav_usd"],
         cash_usd=nav["cash_usd"],

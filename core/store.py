@@ -9,12 +9,21 @@ from typing import Any, List, Optional
 from core.db import db_session, init_db, row_to_dict
 from core.plan_sizing import normalize_plan_item_sizing
 from core.rules import parse_rules, pacific_week_start
-from core.tier_config import normalize_capital_tier, normalize_conviction
+from core.tier_config import (
+    normalize_capital_tier,
+    normalize_conviction,
+    resolve_capital_tier_for_plan_item,
+)
 
 
 def _plan_item_tier_fields(item: dict) -> tuple:
+    action = (item.get("action") or "").lower()
+    if action in ("watch", "hold"):
+        ct = normalize_capital_tier(item.get("capital_tier"))
+    else:
+        ct = resolve_capital_tier_for_plan_item(item)
     return (
-        normalize_capital_tier(item.get("capital_tier")),
+        ct,
         normalize_conviction(item.get("conviction_grade")),
         item.get("sector"),
         item.get("theme_tag"),

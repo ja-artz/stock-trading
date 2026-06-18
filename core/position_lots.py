@@ -9,6 +9,7 @@ from typing import Any, List, Optional
 from core.db import db_session, row_to_dict
 from core.portfolio import compute_nav
 from core.rules import is_option_instrument, pacific_week_start
+from core.tier_config import resolve_capital_tier_for_plan_item
 from core.tier_engine import forced_exit_date_for_tier, normalize_capital_tier
 
 
@@ -71,15 +72,21 @@ def enrich_lots_with_marks(portfolio_id: int, lots: List[dict]) -> List[dict]:
         key = f"{lot['ticker']}:{lot.get('instrument_type', 'stock')}"
         pos = pos_by_key.get(key)
         enriched = dict(lot)
+        lot_qty = float(lot.get("quantity_remaining") or 0)
         if pos:
             enriched["mark_price"] = pos.get("mark_price")
-            enriched["market_value"] = pos.get("market_value")
+            total_qty = float(pos.get("quantity") or 0)
+            full_mv = float(pos.get("market_value") or 0)
+            if total_qty > 1e-9 and lot_qty < total_qty - 1e-9:
+                share = lot_qty / total_qty
+                enriched["market_value"] = round(full_mv * share, 2)
+            else:
+                enriched["market_value"] = full_mv
             enriched["expiry"] = enriched.get("expiry") or pos.get("expiry")
         else:
-            qty = float(lot.get("quantity_remaining") or 0)
             ep = float(lot.get("entry_price") or 0)
             enriched["mark_price"] = ep
-            enriched["market_value"] = qty * ep
+            enriched["market_value"] = lot_qty * ep
         out.append(enriched)
     return out
 
@@ -100,21 +107,35 @@ def create_lot_from_buy(
     correlation_group: Optional[str] = None,
     entry_date: Optional[str] = None,
 ) -> int:
+    from core.plan_execution import get_plan_item
+
     tier = normalize_capital_tier(capital_tier)
     sector_val = sector
     theme_val = theme_tag
     corr = correlation_group
 
     if plan_item_id:
-        from core.plan_execution import get_plan_item
-
         item = get_plan_item(plan_item_id)
         if item:
-            tier = tier or normalize_capital_tier(item.get("capital_tier"))
-            detail = item
+            tier = tier or resolve_capital_tier_for_plan_item(item)
             sector_val = sector_val or item.get("sector")
             theme_val = theme_val or item.get("theme_tag")
             corr = corr or item.get("correlation_group") or item.get("ticker")
+
+    if tier is None:
+        from core.plan_linking import infer_plan_item_id_for_trade
+
+        inferred = infer_plan_item_id_for_trade(
+            portfolio_id, side="buy", ticker=ticker
+        )
+        if inferred:
+            item = get_plan_item(inferred)
+            if item:
+                tier = resolve_capital_tier_for_plan_item(item)
+                plan_item_id = inferred
+                sector_val = sector_val or item.get("sector")
+                theme_val = theme_val or item.get("theme_tag")
+                corr = corr or item.get("correlation_group") or item.get("ticker")
 
     if tier is None:
         tier = 2
@@ -200,6 +221,80 @@ def record_partial_exit(lot_id: int, reason_code: str) -> None:
             "UPDATE position_lots SET partial_exits_json = ? WHERE id = ?",
             (json.dumps(fired), lot_id),
         )
+
+
+def sync_lot_tiers_from_plans(portfolio_id: int) -> int:
+    """Align open lot capital_tier (and plan_item_id) with accepted recommendations."""
+    from core.plan_execution import get_plan_item
+    from core.plan_linking import infer_plan_item_id_for_trade
+
+    lots = get_open_lots(portfolio_id)
+    updates: List[tuple] = []
+    for lot in lots:
+        lot_id = int(lot["id"])
+        current = normalize_capital_tier(lot.get("capital_tier")) or 2
+        pid = lot.get("plan_item_id")
+        if not pid:
+            pid = infer_plan_item_id_for_trade(
+                portfolio_id, side="buy", ticker=lot["ticker"]
+            )
+        if not pid:
+            continue
+        item = get_plan_item(int(pid))
+        if not item:
+            continue
+        want = resolve_capital_tier_for_plan_item(item)
+        needs_tier = want != current
+        needs_link = not lot.get("plan_item_id")
+        if not needs_tier and not needs_link:
+            continue
+        updates.append((lot_id, want, int(pid), needs_tier, needs_link))
+
+    if not updates:
+        return 0
+
+    with db_session() as conn:
+        for lot_id, want, pid, needs_tier, needs_link in updates:
+            if needs_tier:
+                row = conn.execute(
+                    "SELECT entry_date FROM position_lots WHERE id = ?",
+                    (lot_id,),
+                ).fetchone()
+                forced = None
+                if row:
+                    ed = _parse_entry(row["entry_date"])
+                    if ed:
+                        forced = forced_exit_date_for_tier(want, ed)
+                conn.execute(
+                    """
+                    UPDATE position_lots
+                    SET capital_tier = ?, forced_exit_date = ?
+                    WHERE id = ?
+                    """,
+                    (want, forced, lot_id),
+                )
+            if needs_link:
+                conn.execute(
+                    "UPDATE position_lots SET plan_item_id = ? WHERE id = ?",
+                    (pid, lot_id),
+                )
+    return len(updates)
+
+
+def tier_for_ticker_from_plans(portfolio_id: int, ticker: str) -> int:
+    """Best-effort tier for a holding from its accepted buy recommendation."""
+    from core.plan_execution import get_plan_item
+    from core.plan_linking import infer_plan_item_id_for_trade
+
+    pid = infer_plan_item_id_for_trade(
+        portfolio_id, side="buy", ticker=ticker.upper()
+    )
+    if not pid:
+        return 2
+    item = get_plan_item(int(pid))
+    if not item:
+        return 2
+    return resolve_capital_tier_for_plan_item(item)
 
 
 def assign_lot_tier(

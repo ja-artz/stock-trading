@@ -345,6 +345,14 @@ def infer_capital_tier_from_horizon(horizon: Optional[str]) -> int:
     return {"short": 1, "medium": 2, "long": 3}.get(key, 2)
 
 
+def resolve_capital_tier_for_plan_item(item: dict) -> int:
+    """Capital tier from plan item column, detail_json merge, or horizon."""
+    tier = normalize_capital_tier(item.get("capital_tier"))
+    if tier:
+        return tier
+    return infer_capital_tier_from_horizon(item.get("horizon"))
+
+
 def normalize_conviction(val: Any) -> Optional[str]:
     if not val:
         return None

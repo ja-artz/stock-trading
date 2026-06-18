@@ -67,21 +67,22 @@ def compute_daily_nav_series(
         if not port:
             raise ValueError(f"Portfolio {portfolio_id} not found")
         initial_cash = float(port["initial_cash"])
-        trade_rows = conn.execute(
+        ledger_rows = conn.execute(
             """
             SELECT * FROM ledger_events
-            WHERE portfolio_id = ? AND event_type = 'trade'
+            WHERE portfolio_id = ? AND event_type IN ('trade', 'cash_deposit')
             ORDER BY logged_at, id
             """,
             (portfolio_id,),
         ).fetchall()
 
-    trades = [row_to_dict(r) for r in trade_rows]
-    if not trades and not snapshot_by_day:
+    ledger_events = [row_to_dict(r) for r in ledger_rows]
+    trades = [e for e in ledger_events if (e.get("event_type") or "trade") == "trade"]
+    if not ledger_events and not snapshot_by_day:
         return {end: float(compute_nav(portfolio_id)["nav_usd"])}
 
     first_activity = start
-    for t in trades:
+    for t in ledger_events:
         d = _parse_day(t.get("logged_at") or "")
         if d and d < first_activity:
             first_activity = d
@@ -105,15 +106,19 @@ def compute_daily_nav_series(
 
     cash = initial_cash
     holdings: Dict[str, dict] = {}
-    trade_i = 0
+    event_i = 0
     marked: Dict[date, float] = {}
 
     for day in trading_days:
-        while trade_i < len(trades):
-            t = trades[trade_i]
+        while event_i < len(ledger_events):
+            t = ledger_events[event_i]
             trade_day = _parse_day(t.get("logged_at") or "")
             if trade_day is None or trade_day > day:
                 break
+            if (t.get("event_type") or "trade") == "cash_deposit":
+                cash += float(t["quantity"])
+                event_i += 1
+                continue
             side = (t.get("side") or "").lower()
             ticker = (t.get("ticker") or "").upper()
             inst = t.get("instrument_type") or "stock"
@@ -143,7 +148,7 @@ def compute_daily_nav_series(
                 if h["quantity"] <= 1e-9:
                     h["quantity"] = 0.0
                     h["cost_basis_total"] = 0.0
-            trade_i += 1
+            event_i += 1
 
         if day == today:
             nav = float(compute_nav(portfolio_id)["nav_usd"])

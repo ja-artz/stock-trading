@@ -38,6 +38,9 @@ import {
   ChevronDown,
   ChevronRight,
   Calendar,
+  Flame,
+  Target,
+  Shield,
 } from "lucide-react";
 import { useChatContext } from "@/context/ChatContext";
 
@@ -57,21 +60,37 @@ function formatInstrument(type: string | null | undefined): string {
   return "Stock";
 }
 
+const PERSONA_CONSENSUS_KEYS = ["aggressive", "moderate", "minimal_risk"] as const;
+const PERSONA_CONSENSUS_ICONS = {
+  aggressive: Flame,
+  moderate: Target,
+  minimal_risk: Shield,
+} as const;
+const PERSONA_LABELS: Record<(typeof PERSONA_CONSENSUS_KEYS)[number], string> = {
+  aggressive: "Aggressive",
+  moderate: "Moderate",
+  minimal_risk: "Minimal risk",
+};
+
 function PersonaConsensus({ item }: { item: PlanItem }) {
   const consensus = item.persona_consensus;
-  const agree = consensus ? Object.values(consensus).filter(Boolean).length : 0;
   return (
     <div className="flex gap-1">
-      {Array.from({ length: 3 }).map((_, i) => (
-        <div
-          key={i}
-          className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${
-            i < agree ? "bg-blue-100 text-blue-700" : "bg-gray-100 text-gray-400"
-          }`}
-        >
-          {i < agree ? "✓" : "−"}
-        </div>
-      ))}
+      {PERSONA_CONSENSUS_KEYS.map((key) => {
+        const Icon = PERSONA_CONSENSUS_ICONS[key];
+        const agreed = Boolean(consensus?.[key]);
+        return (
+          <div
+            key={key}
+            title={`${PERSONA_LABELS[key]}: ${agreed ? "agrees" : "does not agree"}`}
+            className={`w-7 h-7 rounded-md flex items-center justify-center ${
+              agreed ? "bg-blue-100 text-blue-700 ring-1 ring-blue-200" : "bg-gray-100 text-gray-400"
+            }`}
+          >
+            <Icon className="w-3.5 h-3.5" />
+          </div>
+        );
+      })}
     </div>
   );
 }

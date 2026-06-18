@@ -70,7 +70,7 @@ SQLite lives at `./data/app.db` (bind-mounted). No separate database container.
 - `GET /dashboard`, `GET /stories`, `GET /plans/current` (includes staleness banner fields)  
 - `POST /runs/daily` (requires `X-API-Key` if `HOUSEHOLD_API_KEY` set). Add `?stream=1` for **SSE progress** (used by the web UI).
 - `POST /runs/trading-plan` or `POST /runs/weekly` — generate trading plan (on-demand; may return **no changes** if analysis unchanged since last plan). Add `?stream=1` for **SSE progress**.  
-- `POST /trades`, `PATCH /plans/items/{id}/decision`  
+- `POST /trades` (manual Sofi logs; rules warn but do not block), `POST /portfolio/cash-deposit`, `PATCH /plans/items/{id}/decision`  
 - `GET /insights/latest`, `GET /insights/performance?period=30d`, `GET /insights/personas?period=30d`, `POST /insights/generate`  
 - `POST /chat/threads`, `GET /chat/threads`, `GET /chat/threads/{id}/messages`, `POST /chat/threads/{id}/messages`  
 - `POST /chat/plan-revisions/preview`, `POST /chat/plan-revisions/apply` (requires API key if `HOUSEHOLD_API_KEY` set)  

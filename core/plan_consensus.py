@@ -24,6 +24,13 @@ def consensus_agree_count(consensus: Optional[dict]) -> int:
     return sum(1 for v in c.values() if v)
 
 
+def personas_matching_stance(consensus: Optional[dict]) -> List[str]:
+    c = normalize_persona_consensus(consensus)
+    if not c:
+        return []
+    return [k for k in PERSONA_KEYS if c.get(k)]
+
+
 def has_meaningful_consensus(consensus: Optional[dict]) -> bool:
     return consensus_agree_count(consensus) > 0
 

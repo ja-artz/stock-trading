@@ -181,6 +181,8 @@ def build_tier_state(
             options_pct_of_tier=0.0,
         )
 
+    tier_position_keys: Dict[int, set] = {t: set() for t in buckets}
+
     for lot in lots:
         tier = normalize_capital_tier(lot.get("capital_tier")) or 2
         mv = float(lot.get("market_value") or 0)
@@ -188,7 +190,11 @@ def build_tier_state(
             continue
         b = buckets[tier]
         b.deployed_usd += mv
-        b.position_count += 1
+        pos_key = (
+            (lot.get("ticker") or "").upper(),
+            lot.get("instrument_type") or "stock",
+        )
+        tier_position_keys[tier].add(pos_key)
         if is_option_instrument(lot.get("instrument_type", "stock")):
             b.options_usd += mv
             total_options += mv
@@ -206,6 +212,7 @@ def build_tier_state(
     for tier, b in buckets.items():
         if tier == DRY_POWDER_TIER:
             continue
+        b.position_count = len(tier_position_keys.get(tier, set()))
         b.available_usd = max(0.0, b.budget_usd - b.deployed_usd)
         if b.deployed_usd > 0:
             b.options_pct_of_tier = (b.options_usd / b.deployed_usd) * 100.0

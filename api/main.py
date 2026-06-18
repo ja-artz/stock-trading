@@ -16,7 +16,7 @@ from api.auth import require_api_key
 from api.staleness import plan_staleness_fields
 from core.plan_recency import enrich_plan_context_row, format_minutes_ago, minutes_since
 from core import store
-from core.ledger import log_trade
+from core.ledger import deposit_cash, log_trade
 from core.position_close import close_position
 from core.portfolio_setup import clear_weekly_recommendations, fresh_start, reset_portfolio_to_cash
 from core.portfolio import compute_nav
@@ -85,6 +85,12 @@ class PortfolioCreate(BaseModel):
 class PortfolioResetRequest(BaseModel):
     portfolio_id: int = 1
     cash_usd: float = 1000.0
+
+
+class CashDepositRequest(BaseModel):
+    portfolio_id: int = 1
+    amount_usd: float = Field(..., gt=0)
+    note: Optional[str] = None
 
 
 class PositionImportRow(BaseModel):
@@ -402,6 +408,7 @@ def ticker_names(symbols: str = Query(..., description="Comma-separated tickers,
 
 @app.post("/trades", dependencies=[Depends(require_api_key)])
 def post_trade(body: TradeRequest):
+    # Manual Sofi logs: record actual trades; rules still guide plans, not blocking.
     result = log_trade(
         body.portfolio_id,
         side=body.side,
@@ -416,6 +423,7 @@ def post_trade(body: TradeRequest):
         member_id=body.member_id,
         note=body.note,
         weekly_plan_id=body.weekly_plan_id,
+        block_on_violations=False,
     )
     if not result.get("ok"):
         raise HTTPException(400, detail=result)
@@ -523,6 +531,14 @@ def get_portfolio(portfolio_id: Optional[int] = None):
         "trade_count": trade_count,
         "is_cash_only": trade_count == 0 and len(state.get("positions", [])) == 0,
     }
+
+
+@app.post("/portfolio/cash-deposit", dependencies=[Depends(require_api_key)])
+def portfolio_cash_deposit(body: CashDepositRequest):
+    result = deposit_cash(body.portfolio_id, body.amount_usd, note=body.note)
+    if not result.get("ok"):
+        raise HTTPException(400, detail=result)
+    return result
 
 
 @app.post("/portfolio/reset", dependencies=[Depends(require_api_key)])

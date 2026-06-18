@@ -46,11 +46,40 @@ const PERIOD_OPTIONS: { value: InsightsPeriod; label: string }[] = [
   { value: "all", label: "All time" },
 ];
 
+const PERSONA_KEYS = ["aggressive", "moderate", "minimal_risk"] as const;
 const PERSONA_ICONS = {
   aggressive: Flame,
   moderate: Target,
   minimal_risk: Shield,
 } as const;
+
+function PersonaConsensusIcons({
+  consensus,
+  matched,
+}: {
+  consensus?: Record<string, boolean> | null;
+  matched?: string[];
+}) {
+  return (
+    <div className="flex gap-1">
+      {PERSONA_KEYS.map((key) => {
+        const Icon = PERSONA_ICONS[key];
+        const agreed = Boolean(consensus?.[key]) || (matched?.includes(key) ?? false);
+        return (
+          <div
+            key={key}
+            title={agreed ? `${key} agreed` : `${key} did not agree`}
+            className={`w-6 h-6 rounded-md flex items-center justify-center ${
+              agreed ? "bg-blue-100 text-blue-700 ring-1 ring-blue-200" : "bg-gray-100 text-gray-400"
+            }`}
+          >
+            <Icon className="w-3 h-3" />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 function personaBadgeVariant(persona: string): "default" | "secondary" | "outline" {
   if (persona === "aggressive") return "default";
@@ -380,6 +409,7 @@ export function InsightsPage() {
                             <TableHead className="text-right">Entry</TableHead>
                             <TableHead className="text-right">Exit</TableHead>
                             <TableHead className="text-right">Hold</TableHead>
+                            <TableHead>Personas</TableHead>
                             <TableHead>Followed rec</TableHead>
                             <TableHead className="text-right">Realized P&amp;L</TableHead>
                           </TableRow>
@@ -395,6 +425,12 @@ export function InsightsPage() {
                               <TableCell className="text-right">${trade.entry_price.toFixed(2)}</TableCell>
                               <TableCell className="text-right">${trade.exit_price.toFixed(2)}</TableCell>
                               <TableCell className="text-right">{trade.hold_days}d</TableCell>
+                              <TableCell>
+                                <PersonaConsensusIcons
+                                  consensus={trade.persona_consensus}
+                                  matched={trade.matched_personas}
+                                />
+                              </TableCell>
                               <TableCell>
                                 {trade.followed_rec ? (
                                   <Badge variant="default" className="text-xs">
@@ -445,7 +481,7 @@ export function InsightsPage() {
             <CardHeader>
               <CardTitle>Persona performance</CardTitle>
               <p className="text-sm text-gray-600 mt-1">
-                Closed trades linked to a plan item where that persona agreed in consensus.
+                Performance for recommendations where this persona agreed — open positions and closed trades.
               </p>
             </CardHeader>
             <CardContent>
@@ -458,7 +494,8 @@ export function InsightsPage() {
                       <TableRow>
                         <TableHead>Persona</TableHead>
                         <TableHead className="text-right">Stance agreements</TableHead>
-                        <TableHead className="text-right">Matched trades</TableHead>
+                        <TableHead className="text-right">Closed</TableHead>
+                        <TableHead className="text-right">Open</TableHead>
                         <TableHead className="text-right">Win rate</TableHead>
                         <TableHead className="text-right">Avg return</TableHead>
                         <TableHead>Best trade</TableHead>
@@ -478,6 +515,7 @@ export function InsightsPage() {
                             </TableCell>
                             <TableCell className="text-right">{row.stance_agreements}</TableCell>
                             <TableCell className="text-right">{row.matched_trades}</TableCell>
+                            <TableCell className="text-right">{row.active_positions}</TableCell>
                             <TableCell className="text-right">
                               {row.win_rate_pct != null ? `${row.win_rate_pct}%` : "—"}
                             </TableCell>
@@ -506,7 +544,7 @@ export function InsightsPage() {
                 </div>
               ) : (
                 <p className="text-sm text-gray-600 py-4 text-center">
-                  No persona-matched closed trades in this period.
+                  No persona-matched positions or closed trades yet.
                 </p>
               )}
             </CardContent>
