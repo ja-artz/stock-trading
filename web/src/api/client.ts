@@ -47,12 +47,16 @@ export type Position = {
   quantity: number;
   avg_cost: number;
   mark_price: number;
+  mark_source?: string;
+  quote_as_of?: string | null;
   market_value: number;
   cost_basis?: number;
   unrealized_pnl?: number;
   unrealized_pnl_pct?: number;
   is_option?: boolean;
+  strike?: number | null;
   expiry?: string | null;
+  option_quote_available?: boolean;
 };
 
 export type IndirectTicker = {
@@ -259,6 +263,7 @@ export type InsightsChartPoint = {
 
 export type InsightsClosedTrade = {
   id: number;
+  buy_ledger_event_id?: number;
   date: string;
   ticker: string;
   instrument_type: string;
@@ -268,10 +273,30 @@ export type InsightsClosedTrade = {
   hold_days: number;
   realized_pnl: number;
   pnl_pct: number;
+  entry_fees?: number;
+  exit_fees?: number;
   followed_rec: boolean;
   plan_item_id?: number | null;
   matched_personas?: string[];
   persona_consensus?: Record<string, boolean> | null;
+};
+
+export type LedgerTrade = {
+  id: number;
+  portfolio_id: number;
+  event_type: string;
+  side: string;
+  ticker: string;
+  instrument_type: string;
+  quantity: number;
+  price: number;
+  fees: number;
+  strike?: number | null;
+  expiry?: string | null;
+  plan_item_id?: number | null;
+  member_id?: number | null;
+  logged_at: string;
+  note?: string | null;
 };
 
 export type InsightsPerformance = {

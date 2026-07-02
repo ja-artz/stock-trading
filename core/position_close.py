@@ -4,21 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from core.instruments import is_option_instrument_type, trade_notional
+from core.instruments import find_open_position, is_option_instrument_type, normalize_expiry, trade_notional
 from core.ledger import log_trade
 from core.portfolio import compute_nav
 from core.pricing import get_last_price
-
-
-def _find_position(nav_state: dict, ticker: str, instrument_type: str) -> Optional[dict]:
-    ticker_u = ticker.upper()
-    inst = instrument_type.lower()
-    for p in nav_state.get("positions") or []:
-        if p.get("ticker", "").upper() != ticker_u:
-            continue
-        if (p.get("instrument_type") or "stock").lower() == inst:
-            return p
-    return None
 
 
 def close_position(
@@ -29,6 +18,8 @@ def close_position(
     resolution: str,
     quantity: Optional[float] = None,
     price: Optional[float] = None,
+    strike: Optional[float] = None,
+    expiry: Optional[str] = None,
     member_id: Optional[int] = None,
     note: Optional[str] = None,
 ) -> dict[str, Any]:
@@ -43,7 +34,13 @@ def close_position(
         inst = f"{inst}_option"
 
     nav = compute_nav(portfolio_id)
-    pos = _find_position(nav, ticker, inst)
+    pos = find_open_position(
+        nav.get("positions") or [],
+        ticker,
+        inst,
+        strike=strike,
+        expiry=expiry,
+    )
     if not pos:
         return {"ok": False, "reason": f"No open position for {ticker} ({inst})"}
 
@@ -82,6 +79,8 @@ def close_position(
         instrument_type=inst,
         quantity=qty,
         price=fill_price,
+        strike=pos.get("strike") if strike is None else strike,
+        expiry=normalize_expiry(pos.get("expiry") if expiry is None else expiry),
         member_id=member_id,
         note=note_final,
         block_on_violations=False,

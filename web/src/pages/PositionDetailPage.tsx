@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { ArrowLeft, Info, TrendingDown, TrendingUp, X } from "lucide-react";
+import { ArrowLeft, Info, Pencil, TrendingDown, TrendingUp, X } from "lucide-react";
 import { api } from "@/api/client";
-import { ClosePositionDialog, LogTradeDialog } from "@/components/portfolio/TradeDialogs";
+import { ClosePositionDialog, EditTradeDialog, LogTradeDialog } from "@/components/portfolio/TradeDialogs";
 import { PositionValueChart } from "@/components/portfolio/PositionValueChart";
 import {
   formatInstrumentType,
+  formatMarkSourceLabel,
   formatSignedPct,
   formatSignedUsd,
   formatTradeDate,
@@ -51,17 +52,22 @@ export function PositionDetailPage() {
   const { ticker = "" } = useParams();
   const [searchParams] = useSearchParams();
   const instrumentType = searchParams.get("instrument_type") || "stock";
+  const strikeParam = searchParams.get("strike");
+  const expiryParam = searchParams.get("expiry");
+  const strike = strikeParam != null && strikeParam !== "" ? Number(strikeParam) : undefined;
   const navigate = useNavigate();
   const [data, setData] = useState<PositionDetail | null>(null);
   const [error, setError] = useState("");
 
   const load = useCallback(() => {
     const params = new URLSearchParams({ ticker, instrument_type: instrumentType });
+    if (strike != null && Number.isFinite(strike)) params.set("strike", String(strike));
+    if (expiryParam) params.set("expiry", expiryParam);
     api
       .get<PositionDetail>(`/portfolio/position?${params}`)
       .then(setData)
       .catch((e) => setError(String(e)));
-  }, [ticker, instrumentType]);
+  }, [ticker, instrumentType, strike, expiryParam]);
 
   useEffect(() => {
     load();
@@ -82,8 +88,11 @@ export function PositionDetailPage() {
   const pnl = position.unrealized_pnl ?? 0;
   const pnlPct = position.unrealized_pnl_pct ?? 0;
   const isOption = position.is_option || position.instrument_type.includes("option");
-  const displayType = position.display_type ?? formatInstrumentType(position.instrument_type, position.expiry);
+  const displayType = position.display_type ?? formatInstrumentType(position.instrument_type, position.expiry, position.strike);
   const markPrice = position.mark_price ?? (position.quantity ? position.market_value / position.quantity : 0);
+  const markSub =
+    formatMarkSourceLabel(position) ??
+    (isOption ? "per share" : position.mark_source === "live" ? "real-time" : "at cost");
 
   const onClosed = () => navigate("/portfolio");
 
@@ -109,8 +118,10 @@ export function PositionDetailPage() {
             preset={{
               ticker: position.ticker,
               instrument_type: position.instrument_type,
+              strike: position.strike != null ? String(position.strike) : undefined,
+              expiry: position.expiry ?? undefined,
             }}
-            lockFields={{ ticker: true, instrument_type: true }}
+            lockFields={{ ticker: true, instrument_type: true, strike: true, expiry: true }}
             description="Add shares or log a partial sell to trim this position."
             trigger={
               <Button variant="outline">
@@ -143,7 +154,7 @@ export function PositionDetailPage() {
           value={formatUsd(position.avg_cost)}
           sub={isOption ? "premium total" : "per share"}
         />
-        <StatCard label="Current Price" value={formatUsd(markPrice)} sub={isOption ? "per share" : "real-time"} />
+        <StatCard label="Current Price" value={formatUsd(markPrice)} sub={markSub} />
         <StatCard label="Market Value" value={formatUsd(position.market_value)} sub="total position" />
         <StatCard
           label="Unrealized P&amp;L"
@@ -170,6 +181,10 @@ export function PositionDetailPage() {
         <CardContent>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <DetailField label="Cost Basis" value={formatUsd(position.cost_basis ?? position.market_value - pnl)} />
+            {isOption && position.strike != null && (
+              <DetailField label="Strike" value={formatUsd(position.strike)} />
+            )}
+            {isOption && position.expiry && <DetailField label="Expiry" value={position.expiry} />}
             <DetailField label="First Purchase" value={formatTradeDate(data.first_purchase ?? undefined)} />
             <DetailField
               label="Days Held"
@@ -208,6 +223,7 @@ export function PositionDetailPage() {
                     <TableHead className="text-right">Total</TableHead>
                     <TableHead className="text-right">Fees</TableHead>
                     <TableHead>Note</TableHead>
+                    <TableHead className="w-16" />
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -224,6 +240,18 @@ export function PositionDetailPage() {
                       <TableCell className="text-right font-medium">{formatUsd(trade.total)}</TableCell>
                       <TableCell className="text-right text-sm text-gray-600">{formatUsd(trade.fees)}</TableCell>
                       <TableCell className="text-sm text-gray-600 max-w-md">{trade.note || "—"}</TableCell>
+                      <TableCell>
+                        <EditTradeDialog
+                          ledgerEventId={trade.id}
+                          onSaved={load}
+                          trigger={
+                            <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
+                              <span className="sr-only">Edit trade</span>
+                              <Pencil className="w-4 h-4" />
+                            </Button>
+                          }
+                        />
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -233,11 +261,11 @@ export function PositionDetailPage() {
         </CardContent>
       </Card>
 
-      {isOption && (
+      {isOption && !position.option_quote_available && (
         <Alert>
           <Info className="h-4 w-4" />
           <AlertDescription>
-            Options are marked at cost in the paper book until live option quotes are available.
+            Live option quote unavailable — showing cost basis until yfinance returns a chain price. Ensure strike and expiry are set on the position.
           </AlertDescription>
         </Alert>
       )}

@@ -7,7 +7,13 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from core.db import db_session, row_to_dict
-from core.instruments import is_option_instrument_type, trade_notional
+from core.instruments import (
+    find_open_position,
+    is_option_instrument_type,
+    normalize_expiry,
+    position_key,
+    trade_notional,
+)
 from core.portfolio import compute_nav
 from core.pricing import close_on_or_before, get_daily_close_series
 from core.ticker_names import company_name_for
@@ -62,8 +68,7 @@ def _day_iso(day: date) -> str:
 
 
 def _build_value_history(
-    sym: str,
-    inst: str,
+    position: dict[str, Any],
     trades: list[dict[str, Any]],
     first_purchase: str | None,
     cost_basis: float,
@@ -71,8 +76,11 @@ def _build_value_history(
     snap_rows: list,
 ) -> list[dict[str, Any]]:
     """One mark per calendar day from purchase through today."""
+    sym = position["ticker"]
+    inst = position["instrument_type"]
     today = datetime.now(timezone.utc).date()
     rounded_mv = round(current_mv, 2)
+    pos_key = position_key(sym, inst, strike=position.get("strike"), expiry=position.get("expiry"))
 
     if not first_purchase:
         return [{"as_of": datetime.now(timezone.utc).isoformat(), "market_value": rounded_mv}]
@@ -81,12 +89,17 @@ def _build_value_history(
     if start_day is None:
         start_day = today
 
-    # Snapshot marks override computed marks when present.
     snapshot_by_day: dict[str, float] = {}
     for snap in snap_rows:
         positions_at = json.loads(snap["positions_json"] or "[]")
         for p in positions_at:
-            if p.get("ticker") == sym and p.get("instrument_type") == inst:
+            p_key = position_key(
+                p.get("ticker") or "",
+                p.get("instrument_type") or "stock",
+                strike=p.get("strike"),
+                expiry=p.get("expiry"),
+            )
+            if p_key == pos_key:
                 snapshot_by_day[_day_key(snap["as_of"])] = round(float(p.get("market_value") or 0), 2)
                 break
 
@@ -103,7 +116,10 @@ def _build_value_history(
             day += timedelta(days=1)
             continue
 
-        if day_key in snapshot_by_day:
+        if day == today:
+            mv = rounded_mv
+            source = position.get("mark_source") or "live"
+        elif day_key in snapshot_by_day:
             mv = snapshot_by_day[day_key]
             source = "snapshot"
         elif day == start_day:
@@ -121,26 +137,48 @@ def _build_value_history(
                 mv = round(cost_basis, 2)
                 source = "cost_basis"
 
-        if day == today:
-            mv = rounded_mv
-            source = "live"
-
         history.append({"as_of": _day_iso(day), "market_value": mv, "mark_source": source})
         day += timedelta(days=1)
 
     return history
 
 
-def get_position_detail(portfolio_id: int, ticker: str, instrument_type: str = "stock") -> dict[str, Any]:
+def _trade_matches_contract(ev: dict[str, Any], strike: Any, expiry: Any) -> bool:
+    if strike is None and not expiry:
+        return True
+    if strike is not None and ev.get("strike") is not None:
+        try:
+            if abs(float(ev["strike"]) - float(strike)) > 0.01:
+                return False
+        except (TypeError, ValueError):
+            return False
+    elif strike is not None and ev.get("strike") is None:
+        return False
+    if expiry and ev.get("expiry"):
+        if normalize_expiry(ev.get("expiry")) != normalize_expiry(expiry):
+            return False
+    elif expiry and not ev.get("expiry"):
+        return False
+    return True
+
+
+def get_position_detail(
+    portfolio_id: int,
+    ticker: str,
+    instrument_type: str = "stock",
+    *,
+    strike: float | None = None,
+    expiry: str | None = None,
+) -> dict[str, Any]:
     sym = ticker.strip().upper()
     inst = (instrument_type or "stock").strip().lower()
     state = compute_nav(portfolio_id)
-    position = next(
-        (p for p in state["positions"] if p["ticker"] == sym and p["instrument_type"] == inst),
-        None,
-    )
+    position = find_open_position(state["positions"], sym, inst, strike=strike, expiry=expiry)
     if not position:
         raise ValueError(f"No open position for {sym} ({inst})")
+
+    contract_strike = position.get("strike") if strike is None else strike
+    contract_expiry = position.get("expiry") if expiry is None else normalize_expiry(expiry)
 
     with db_session() as conn:
         trade_rows = conn.execute(
@@ -165,6 +203,10 @@ def get_position_detail(portfolio_id: int, ticker: str, instrument_type: str = "
     buy_dates: list[str] = []
     for row in trade_rows:
         ev = row_to_dict(row)
+        if is_option_instrument_type(inst) and not _trade_matches_contract(
+            ev, contract_strike, contract_expiry
+        ):
+            continue
         qty = float(ev["quantity"])
         price = float(ev["price"])
         fees = float(ev.get("fees") or 0)
@@ -185,8 +227,7 @@ def get_position_detail(portfolio_id: int, ticker: str, instrument_type: str = "
     current_mv = float(position.get("market_value") or 0)
     cost_basis = round(float(position.get("cost_basis") or current_mv), 2)
     value_history = _build_value_history(
-        sym,
-        inst,
+        position,
         trades,
         first_purchase,
         cost_basis,
@@ -197,7 +238,8 @@ def get_position_detail(portfolio_id: int, ticker: str, instrument_type: str = "
     enriched = dict(position)
     enriched["company_name"] = company_name_for(sym)
     if is_option_instrument_type(inst) and enriched.get("expiry"):
-        enriched["display_type"] = f"{'Call' if 'call' in inst else 'Put'} ({enriched['expiry']})"
+        strike_label = f" ${enriched['strike']}" if enriched.get("strike") is not None else ""
+        enriched["display_type"] = f"{'Call' if 'call' in inst else 'Put'}{strike_label} ({enriched['expiry']})"
     else:
         enriched["display_type"] = "Stock" if inst == "stock" else inst.replace("_", " ").title()
 

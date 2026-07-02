@@ -2,18 +2,46 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from core.db import db_session, row_to_dict
 from core.instruments import (
     OPTION_CONTRACT_MULTIPLIER,
     apply_buy_to_cash,
     apply_sell_to_cash,
+    find_open_position,
     is_option_instrument_type,
+    normalize_expiry,
+    position_key,
     trade_notional,
 )
-from core.pricing import get_last_price
+from core.pricing import clear_option_chain_cache, get_last_price, get_option_mark_for_position
+from core import store
 from core.rules import is_option_instrument
+
+
+def _holding_key_from_event(ev: dict) -> str:
+    return position_key(
+        ev.get("ticker") or "",
+        ev.get("instrument_type") or "stock",
+        strike=ev.get("strike"),
+        expiry=ev.get("expiry"),
+    )
+
+
+def _mark_option_position(h: dict) -> tuple[float, str, Optional[str]]:
+    """Return (premium_per_share, mark_source, quote_as_of)."""
+    qty = float(h.get("quantity") or 0)
+    cost_total = float(h.get("cost_basis_total") or 0)
+    fallback = cost_total / (qty * OPTION_CONTRACT_MULTIPLIER) if qty else 0.0
+
+    mark_info = get_option_mark_for_position(h)
+    quote = mark_info.get("premium_per_share")
+    if quote is not None and float(quote) > 0:
+        fetched_at = mark_info.get("fetched_at")
+        return float(quote), "live", str(fetched_at) if fetched_at else None
+
+    return fallback, "cost", None
 
 
 def compute_positions_from_ledger(portfolio_id: int) -> Tuple[float, List[dict]]:
@@ -47,7 +75,7 @@ def compute_positions_from_ledger(portfolio_id: int) -> Tuple[float, List[dict]]
         price = float(ev["price"])
         fees = float(ev.get("fees") or 0)
         inst = ev.get("instrument_type") or "stock"
-        key = f"{ticker}:{inst}"
+        key = _holding_key_from_event(ev)
 
         if key not in holdings:
             holdings[key] = {
@@ -56,13 +84,17 @@ def compute_positions_from_ledger(portfolio_id: int) -> Tuple[float, List[dict]]
                 "quantity": 0.0,
                 "cost_basis_total": 0.0,
                 "strike": ev.get("strike"),
-                "expiry": ev.get("expiry"),
+                "expiry": normalize_expiry(ev.get("expiry")),
             }
         h = holdings[key]
         if side == "buy":
             cash = apply_buy_to_cash(cash, qty, price, inst, fees)
             h["cost_basis_total"] += trade_notional(qty, price, inst)
             h["quantity"] += qty
+            if h.get("strike") is None and ev.get("strike") is not None:
+                h["strike"] = ev.get("strike")
+            if not h.get("expiry") and ev.get("expiry"):
+                h["expiry"] = normalize_expiry(ev.get("expiry"))
         elif side == "sell":
             cash = apply_sell_to_cash(cash, qty, price, inst, fees)
             if h["quantity"] > 1e-9:
@@ -81,14 +113,16 @@ def compute_positions_from_ledger(portfolio_id: int) -> Tuple[float, List[dict]]
         cost_total = h["cost_basis_total"]
         inst = h["instrument_type"]
 
+        quote_as_of: Optional[str] = None
         if is_option_instrument_type(inst):
-            # Paper book: mark options at cost (premium paid) until we have option quotes.
-            premium_per_share = cost_total / (qty * OPTION_CONTRACT_MULTIPLIER) if qty else 0.0
-            mark = premium_per_share
-            market_value = cost_total
+            mark, mark_source, quote_as_of = _mark_option_position(h)
+            market_value = mark * qty * OPTION_CONTRACT_MULTIPLIER
             avg_cost_display = cost_total / qty if qty else 0.0
         else:
             mark = get_last_price(h["ticker"]) or 0.0
+            mark_source = "live" if mark > 0 else "cost"
+            if mark > 0:
+                quote_as_of = store.utc_now_iso()
             if mark <= 0 and qty > 0:
                 mark = cost_total / qty
             market_value = mark * qty
@@ -104,6 +138,8 @@ def compute_positions_from_ledger(portfolio_id: int) -> Tuple[float, List[dict]]
                 "quantity": qty,
                 "avg_cost": avg_cost_display,
                 "mark_price": mark,
+                "mark_source": mark_source,
+                "quote_as_of": quote_as_of,
                 "market_value": round(market_value, 2),
                 "cost_basis": cost_basis,
                 "unrealized_pnl": unrealized_pnl,
@@ -111,12 +147,14 @@ def compute_positions_from_ledger(portfolio_id: int) -> Tuple[float, List[dict]]
                 "strike": h.get("strike"),
                 "expiry": h.get("expiry"),
                 "is_option": is_option_instrument_type(inst),
+                "option_quote_available": mark_source == "live",
             }
         )
     return cash, positions
 
 
 def compute_nav(portfolio_id: int) -> dict:
+    clear_option_chain_cache()
     cash, positions = compute_positions_from_ledger(portfolio_id)
     invested = sum(p.get("market_value", 0) for p in positions)
     nav = cash + invested
@@ -135,12 +173,23 @@ def compute_nav(portfolio_id: int) -> dict:
     }
 
 
-def is_new_position(portfolio_id: int, ticker: str) -> bool:
+def is_new_position(
+    portfolio_id: int,
+    ticker: str,
+    instrument_type: str = "stock",
+    *,
+    strike: Optional[float] = None,
+    expiry: Optional[str] = None,
+) -> bool:
     _, positions = compute_positions_from_ledger(portfolio_id)
-    for p in positions:
-        if p["ticker"].upper() == ticker.upper() and abs(p["quantity"]) > 0:
-            return False
-    return True
+    pos = find_open_position(
+        positions,
+        ticker,
+        instrument_type,
+        strike=strike,
+        expiry=expiry,
+    )
+    return not (pos and abs(pos.get("quantity", 0)) > 0)
 
 
 def open_option_count(positions: List[dict]) -> int:

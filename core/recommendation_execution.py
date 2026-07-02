@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any, List, Optional
 
 from core.db import db_session
+from core.instruments import find_open_position
 from core.portfolio import compute_nav
-from core.rules import is_option_instrument
 
 
 def _norm_inst(inst: Optional[str]) -> str:
@@ -24,24 +24,7 @@ def _find_position(
     strike: Optional[float] = None,
     expiry: Optional[str] = None,
 ) -> Optional[dict]:
-    t = ticker.upper()
-    inst = _norm_inst(instrument_type)
-    for p in positions:
-        if (p.get("ticker") or "").upper() != t:
-            continue
-        if _norm_inst(p.get("instrument_type")) != inst:
-            continue
-        if is_option_instrument(inst) and strike is not None and p.get("strike") is not None:
-            try:
-                if abs(float(p["strike"]) - float(strike)) > 0.01:
-                    continue
-            except (TypeError, ValueError):
-                pass
-        if is_option_instrument(inst) and expiry and p.get("expiry"):
-            if str(p["expiry"])[:10] != str(expiry)[:10]:
-                continue
-        return p
-    return None
+    return find_open_position(positions, ticker, instrument_type, strike=strike, expiry=expiry)
 
 
 def _action_side(action: str) -> Optional[str]:

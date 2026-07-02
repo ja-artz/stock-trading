@@ -120,6 +120,7 @@ class TraderAgent:
         timing_json = prompt_parts["timing_json"]
         recent_plans_json = prompt_parts["recent_plans_json"]
         quotes_json = prompt_parts["quotes_json"]
+        option_quotes_json = prompt_parts.get("option_quotes_json") or "[]"
         plan_as_of_iso = prompt_parts["plan_as_of_iso"]
         plan_as_of = datetime.now().date()
 
@@ -169,6 +170,9 @@ Portfolio state:
 
 Market quotes (REQUIRED for stock per-share math — same source as Portfolio marks; do NOT invent prices):
 {quotes_json}
+
+Option quotes (REQUIRED for open option sell/trim math — premium per share from yfinance option chain):
+{option_quotes_json}
 
 Trading rules (MUST NOT violate):
 {json.dumps(rules, indent=2)}
@@ -237,7 +241,9 @@ Sizing (REQUIRED for every item except watch/hold with no trade):
 - Do NOT rely on vague labels like small/medium/large as the primary guidance.
 - For buys: notional_usd and quantity (shares or contracts); pct_cash and pct_nav when helpful.
 - For trim/sell: pct_position and/or quantity; notional_usd estimate using market_quotes when useful.
-- For options: quantity in contracts; sizing.summary must repeat strike + expiry from option_contract (options are not in market_quotes).
+- For options: quantity in contracts; sizing.summary must repeat strike + expiry from option_contract.
+- Use option_quotes.contracts[].premium_per_share and unrealized_pnl_pct for open option sell/trim sizing (never use underlying stock price as option premium).
+- If an open option is missing from option_quotes or premium_per_share is null, use pct_position only and note missing quote in rule_warnings.
 - sizing.summary: one human-readable line (e.g. "Buy ~$271 (2 shares @ ~$135.50); ~27% of cash, ~12% of NAV").
 - Respect cash floor and max position %; mention conflicts in rule_warnings.
 

@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 from typing import Any, List, Optional
 
 from core.db import db_session, row_to_dict
+from core.instruments import normalize_expiry, position_key, positions_match
 from core.portfolio import compute_nav
 from core.rules import is_option_instrument, pacific_week_start
 from core.tier_config import resolve_capital_tier_for_plan_item
@@ -64,13 +65,28 @@ def enrich_lots_with_marks(portfolio_id: int, lots: List[dict]) -> List[dict]:
     nav = compute_nav(portfolio_id)
     pos_by_key = {}
     for p in nav["positions"]:
-        key = f"{p['ticker']}:{p.get('instrument_type', 'stock')}"
+        key = position_key(
+            p["ticker"],
+            p.get("instrument_type", "stock"),
+            strike=p.get("strike"),
+            expiry=p.get("expiry"),
+        )
         pos_by_key[key] = p
 
     out = []
     for lot in lots:
-        key = f"{lot['ticker']}:{lot.get('instrument_type', 'stock')}"
+        key = position_key(
+            lot["ticker"],
+            lot.get("instrument_type", "stock"),
+            strike=lot.get("strike"),
+            expiry=lot.get("expiry"),
+        )
         pos = pos_by_key.get(key)
+        if not pos:
+            for candidate in nav["positions"]:
+                if positions_match(lot, candidate):
+                    pos = candidate
+                    break
         enriched = dict(lot)
         lot_qty = float(lot.get("quantity_remaining") or 0)
         if pos:
@@ -83,6 +99,7 @@ def enrich_lots_with_marks(portfolio_id: int, lots: List[dict]) -> List[dict]:
             else:
                 enriched["market_value"] = full_mv
             enriched["expiry"] = enriched.get("expiry") or pos.get("expiry")
+            enriched["strike"] = enriched.get("strike") or pos.get("strike")
         else:
             ep = float(lot.get("entry_price") or 0)
             enriched["mark_price"] = ep
@@ -100,6 +117,7 @@ def create_lot_from_buy(
     quantity: float,
     price: float,
     plan_item_id: Optional[int] = None,
+    strike: Optional[float] = None,
     expiry: Optional[str] = None,
     capital_tier: Optional[int] = None,
     sector: Optional[str] = None,
@@ -149,8 +167,8 @@ def create_lot_from_buy(
             INSERT INTO position_lots
             (portfolio_id, ledger_event_id, plan_item_id, ticker, instrument_type,
              capital_tier, entry_date, entry_price, quantity_remaining, forced_exit_date,
-             partial_exits_json, thesis_status, sector, theme_tag, correlation_group, expiry)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', 'active', ?, ?, ?, ?)
+             partial_exits_json, thesis_status, sector, theme_tag, correlation_group, expiry, strike)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', 'active', ?, ?, ?, ?, ?)
             """,
             (
                 portfolio_id,
@@ -166,7 +184,8 @@ def create_lot_from_buy(
                 sector_val,
                 theme_val,
                 corr.upper() if corr else ticker.upper(),
-                expiry,
+                normalize_expiry(expiry),
+                strike,
             ),
         )
         return int(cur.lastrowid)
@@ -177,12 +196,15 @@ def reduce_lot_on_sell(
     ticker: str,
     instrument_type: str,
     quantity_sold: float,
+    *,
+    strike: Optional[float] = None,
+    expiry: Optional[str] = None,
 ) -> None:
     remaining = quantity_sold
     with db_session() as conn:
         rows = conn.execute(
             """
-            SELECT id, quantity_remaining FROM position_lots
+            SELECT id, quantity_remaining, strike, expiry FROM position_lots
             WHERE portfolio_id = ? AND ticker = ? AND instrument_type = ?
               AND quantity_remaining > 1e-9
             ORDER BY entry_date, id
@@ -190,6 +212,21 @@ def reduce_lot_on_sell(
             (portfolio_id, ticker.upper(), instrument_type),
         ).fetchall()
         for row in rows:
+            lot_probe = {
+                "ticker": ticker,
+                "instrument_type": instrument_type,
+                "strike": row["strike"],
+                "expiry": row["expiry"],
+            }
+            sell_probe = {
+                "ticker": ticker,
+                "instrument_type": instrument_type,
+                "strike": strike,
+                "expiry": expiry,
+            }
+            if strike is not None or expiry:
+                if not positions_match(lot_probe, sell_probe):
+                    continue
             if remaining <= 1e-9:
                 break
             lot_id = row["id"]
@@ -338,10 +375,18 @@ def get_unmapped_positions(portfolio_id: int) -> List[dict]:
     """Holdings in ledger without open position_lots rows."""
     nav = compute_nav(portfolio_id)
     lots = get_open_lots(portfolio_id)
-    lot_keys = {(l["ticker"], l.get("instrument_type", "stock")) for l in lots}
+    lot_keys = {
+        position_key(l["ticker"], l.get("instrument_type", "stock"), strike=l.get("strike"), expiry=l.get("expiry"))
+        for l in lots
+    }
     unmapped = []
     for p in nav["positions"]:
-        key = (p["ticker"], p.get("instrument_type", "stock"))
+        key = position_key(
+            p["ticker"],
+            p.get("instrument_type", "stock"),
+            strike=p.get("strike"),
+            expiry=p.get("expiry"),
+        )
         if key not in lot_keys:
             unmapped.append(p)
     return unmapped
@@ -374,8 +419,8 @@ def backfill_lot_from_holding(
             INSERT INTO position_lots
             (portfolio_id, ledger_event_id, plan_item_id, ticker, instrument_type,
              capital_tier, entry_date, entry_price, quantity_remaining, forced_exit_date,
-             partial_exits_json, thesis_status, sector, correlation_group, expiry)
-            VALUES (?, 0, NULL, ?, ?, ?, ?, ?, ?, ?, '[]', 'active', ?, ?, ?)
+             partial_exits_json, thesis_status, sector, correlation_group, expiry, strike)
+            VALUES (?, 0, NULL, ?, ?, ?, ?, ?, ?, ?, '[]', 'active', ?, ?, ?, ?)
             """,
             (
                 portfolio_id,
@@ -392,6 +437,7 @@ def backfill_lot_from_holding(
                 sector,
                 ticker.upper(),
                 pos.get("expiry"),
+                pos.get("strike"),
             ),
         )
         return int(cur.lastrowid)
@@ -404,3 +450,94 @@ def _parse_entry(val: Optional[str]) -> Optional[date]:
         return date.fromisoformat(str(val)[:10])
     except ValueError:
         return None
+
+
+def rebuild_position_lots_from_ledger(portfolio_id: int) -> None:
+    """Replay ledger buys/sells to rebuild open lot rows after a trade correction."""
+    with db_session() as conn:
+        rows = conn.execute(
+            "SELECT * FROM position_lots WHERE portfolio_id = ?",
+            (portfolio_id,),
+        ).fetchall()
+        meta_by_ledger: dict[int, dict] = {}
+        for row in rows:
+            d = row_to_dict(row)
+            leid = d.get("ledger_event_id")
+            if leid:
+                meta_by_ledger[int(leid)] = {
+                    "capital_tier": d.get("capital_tier"),
+                    "sector": d.get("sector"),
+                    "theme_tag": d.get("theme_tag"),
+                    "thesis_status": d.get("thesis_status"),
+                    "partial_exits_json": d.get("partial_exits_json"),
+                    "correlation_group": d.get("correlation_group"),
+                    "plan_item_id": d.get("plan_item_id"),
+                }
+        conn.execute(
+            """
+            UPDATE action_items
+            SET position_lot_id = NULL
+            WHERE position_lot_id IN (
+                SELECT id FROM position_lots WHERE portfolio_id = ?
+            )
+            """,
+            (portfolio_id,),
+        )
+        conn.execute("DELETE FROM position_lots WHERE portfolio_id = ?", (portfolio_id,))
+
+        events = conn.execute(
+            """
+            SELECT * FROM ledger_events
+            WHERE portfolio_id = ? AND event_type = 'trade'
+            ORDER BY logged_at, id
+            """,
+            (portfolio_id,),
+        ).fetchall()
+
+    for row in events:
+        ev = row_to_dict(row)
+        side = (ev.get("side") or "").lower()
+        if side == "buy":
+            meta = meta_by_ledger.get(int(ev["id"]), {})
+            entry_day = _parse_entry(ev.get("logged_at")) or date.today()
+            tier = normalize_capital_tier(meta.get("capital_tier")) or 2
+            plan_item_id = meta.get("plan_item_id") or ev.get("plan_item_id")
+            forced = forced_exit_date_for_tier(tier, entry_day)
+            with db_session() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO position_lots
+                    (portfolio_id, ledger_event_id, plan_item_id, ticker, instrument_type,
+                     capital_tier, entry_date, entry_price, quantity_remaining, forced_exit_date,
+                     partial_exits_json, thesis_status, sector, theme_tag, correlation_group, expiry, strike)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        portfolio_id,
+                        int(ev["id"]),
+                        plan_item_id,
+                        (ev.get("ticker") or "").upper(),
+                        ev.get("instrument_type") or "stock",
+                        tier,
+                        entry_day.isoformat(),
+                        float(ev["price"]),
+                        float(ev["quantity"]),
+                        forced,
+                        meta.get("partial_exits_json") or "[]",
+                        meta.get("thesis_status") or "active",
+                        meta.get("sector"),
+                        meta.get("theme_tag"),
+                        meta.get("correlation_group") or (ev.get("ticker") or "").upper(),
+                        normalize_expiry(ev.get("expiry")),
+                        ev.get("strike"),
+                    ),
+                )
+        elif side == "sell":
+            reduce_lot_on_sell(
+                portfolio_id,
+                ev.get("ticker") or "",
+                ev.get("instrument_type") or "stock",
+                float(ev["quantity"]),
+                strike=ev.get("strike"),
+                expiry=ev.get("expiry"),
+            )

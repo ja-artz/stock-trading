@@ -15,6 +15,7 @@ from core.benchmarks import (
     snapshot_benchmark_closes,
 )
 from core.db import db_session, row_to_dict
+from core.instruments import position_key, trade_notional
 from core.plan_consensus import PERSONA_KEYS, normalize_persona_consensus, personas_matching_stance
 from core.plan_linking import accepted_plans_by_ticker, resolve_trade_attribution
 from core.portfolio import compute_nav
@@ -70,6 +71,8 @@ class _OpenLot:
     entry_day: date
     plan_item_id: Optional[int]
     instrument_type: str
+    ledger_event_id: int
+    entry_fees: float = 0.0
 
 
 def _load_plan_item_meta(plan_item_ids: List[int]) -> Dict[int, dict]:
@@ -128,7 +131,7 @@ def closed_trades_from_ledger(
         side = (ev.get("side") or "").lower()
         ticker = (ev.get("ticker") or "").upper()
         inst = ev.get("instrument_type") or "stock"
-        key = f"{ticker}:{inst}"
+        key = position_key(ticker, inst, strike=ev.get("strike"), expiry=ev.get("expiry"))
         qty = float(ev["quantity"])
         price = float(ev["price"])
         logged_day = _parse_logged_day(ev["logged_at"])
@@ -144,24 +147,29 @@ def closed_trades_from_ledger(
                     entry_day=logged_day,
                     plan_item_id=int(plan_item_id) if plan_item_id else None,
                     instrument_type=inst,
+                    ledger_event_id=int(ev["id"]),
+                    entry_fees=float(ev.get("fees") or 0),
                 )
             )
         elif side == "sell":
             remaining = qty
             sell_id = int(ev["id"])
+            sell_fees = float(ev.get("fees") or 0)
             sell_plan_item_id = int(plan_item_id) if plan_item_id else None
             while remaining > 1e-9 and open_lots[key]:
                 lot = open_lots[key][0]
                 take = min(lot.quantity, remaining)
-                entry_notional = lot.entry_price * take
-                exit_notional = price * take
+                entry_notional = trade_notional(take, lot.entry_price, lot.instrument_type)
+                exit_notional = trade_notional(take, price, lot.instrument_type)
                 realized = exit_notional - entry_notional
                 pnl_pct = (realized / entry_notional * 100.0) if entry_notional > 0 else 0.0
                 hold_days = max(0, (logged_day - lot.entry_day).days)
+                fee_share = sell_fees * (take / qty) if qty > 0 else 0.0
                 if _in_period(logged_day, period_start, end):
                     closed.append(
                         {
                             "id": sell_id,
+                            "buy_ledger_event_id": lot.ledger_event_id,
                             "date": logged_day.isoformat(),
                             "ticker": ticker,
                             "instrument_type": inst,
@@ -171,6 +179,8 @@ def closed_trades_from_ledger(
                             "hold_days": hold_days,
                             "realized_pnl": round(realized, 2),
                             "pnl_pct": round(pnl_pct, 2),
+                            "entry_fees": round(lot.entry_fees * (take / lot.quantity) if lot.quantity else 0, 2),
+                            "exit_fees": round(fee_share, 2),
                             "plan_item_id": lot.plan_item_id,
                             "sell_plan_item_id": sell_plan_item_id,
                         }
@@ -458,31 +468,34 @@ def _open_positions_by_persona(portfolio_id: int) -> Dict[str, List[dict]]:
     plan_ids += [p["plan_item_id"] for p in any_plans.values()]
     meta = _load_plan_item_meta(list(set(plan_ids)))
 
-    # Aggregate lots to one row per ticker before persona attribution.
-    by_ticker: Dict[str, dict] = {}
+    # Aggregate lots to one row per position (ticker + instrument + option contract).
+    by_position: Dict[str, dict] = {}
     for lot in lots:
         ticker = (lot.get("ticker") or "").upper()
         if not ticker:
             continue
+        inst = lot.get("instrument_type") or "stock"
+        pos_key = position_key(ticker, inst, strike=lot.get("strike"), expiry=lot.get("expiry"))
         qty = float(lot.get("quantity_remaining") or 0)
         entry = float(lot.get("entry_price") or 0)
         mv = float(lot.get("market_value") or 0)
-        cost = qty * entry
-        if ticker not in by_ticker:
-            by_ticker[ticker] = {
+        cost = trade_notional(qty, entry, inst)
+        if pos_key not in by_position:
+            by_position[pos_key] = {
                 "ticker": ticker,
                 "plan_item_id": lot.get("plan_item_id"),
                 "cost": 0.0,
                 "mv": 0.0,
             }
-        row = by_ticker[ticker]
+        row = by_position[pos_key]
         row["cost"] += cost
         row["mv"] += mv
         if lot.get("plan_item_id") and not row.get("plan_item_id"):
             row["plan_item_id"] = lot.get("plan_item_id")
 
     by_persona: Dict[str, List[dict]] = {k: [] for k in PERSONA_KEYS}
-    for ticker, agg in by_ticker.items():
+    for agg in by_position.values():
+        ticker = agg["ticker"]
         attr = resolve_trade_attribution(
             portfolio_id,
             ticker,
@@ -550,15 +563,16 @@ def build_persona_insights(portfolio_id: int, period: str = "30d") -> dict[str, 
     with db_session() as conn:
         rows = conn.execute(
             """
-            SELECT pi.persona_consensus, wp.plan_at
+            SELECT pi.persona_consensus, d.decided_at
             FROM plan_items pi
             JOIN weekly_plans wp ON wp.id = pi.weekly_plan_id
+            JOIN decisions d ON d.plan_item_id = pi.id AND d.decision = 'accepted'
             WHERE wp.portfolio_id = ?
             """,
             (portfolio_id,),
         ).fetchall()
     for row in rows:
-        plan_day = _parse_logged_day(row["plan_at"])
+        plan_day = _parse_logged_day(row["decided_at"])
         if not _in_period(plan_day, period_start, period_end):
             continue
         raw = row["persona_consensus"]

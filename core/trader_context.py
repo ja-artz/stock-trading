@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional
 from core.market_quotes import (
     collect_symbols_for_quotes,
     fetch_market_quotes,
+    fetch_option_quotes,
+    format_option_quotes_for_prompt,
     format_quotes_for_prompt,
     merge_position_marks,
 )
@@ -164,6 +166,7 @@ def build_trader_context(
     recent_plans = store.get_recent_weekly_plans_context(portfolio_id, limit=history_depth)
 
     quote_bundle: dict[str, Any] = {"quotes": {}, "fetched_at": None}
+    option_quote_bundle: dict[str, Any] = {"contracts": [], "as_of": None}
     if fetch_quotes:
         symbols = set(collect_symbols_for_quotes(stories, nav_state.get("positions")))
         if current_plan:
@@ -173,6 +176,7 @@ def build_trader_context(
                     symbols.add(t)
         quote_bundle = fetch_market_quotes(sorted(symbols))
         quote_bundle = merge_position_marks(quote_bundle, nav_state.get("positions") or [])
+        option_quote_bundle = fetch_option_quotes(nav_state.get("positions") or [])
 
     focus = focus or {}
     focus_type = (focus.get("type") or "").strip().lower()
@@ -234,7 +238,9 @@ def build_trader_context(
         "recent_plans": recent_plans,
         "last_plan_timing": timing,
         "market_quotes": quote_bundle,
+        "option_quotes": option_quote_bundle,
         "quotes_prompt": format_quotes_for_prompt(quote_bundle),
+        "option_quotes_prompt": format_option_quotes_for_prompt(option_quote_bundle),
         "focus": focus,
         "focused_story": focused_story,
         "focused_plan_item": focused_item,
@@ -256,6 +262,7 @@ def format_context_for_plan_prompt(ctx: dict[str, Any]) -> dict[str, str]:
         "timing_json": json.dumps(ctx["last_plan_timing"], indent=2),
         "recent_plans_json": json.dumps(ctx["recent_plans"], indent=2) if ctx["recent_plans"] else "[]",
         "quotes_json": ctx["quotes_prompt"],
+        "option_quotes_json": ctx.get("option_quotes_prompt") or "[]",
         "rules_json": json.dumps(ctx["rules"], indent=2),
         "stories_json": stories_json,
         "nav_positions_json": json.dumps(nav.get("positions") or [], indent=2),

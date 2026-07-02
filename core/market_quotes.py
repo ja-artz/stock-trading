@@ -1,4 +1,4 @@
-"""Live equity quotes for trader-agent sizing (same yfinance source as Portfolio marks)."""
+"""Live equity and option quotes for trader-agent sizing."""
 
 from __future__ import annotations
 
@@ -6,7 +6,13 @@ import json
 from typing import Any, Dict, List, Optional, Set
 
 from core import store
-from core.pricing import get_last_price
+from core.instruments import (
+    OPTION_CONTRACT_MULTIPLIER,
+    is_option_instrument_type,
+    normalize_expiry,
+    option_right_from_instrument,
+)
+from core.pricing import get_last_price, get_option_mark_for_position
 from core.ticker_names import company_name_for
 from validation import collect_tickers_from_stories
 
@@ -17,6 +23,8 @@ def collect_symbols_for_quotes(
 ) -> List[str]:
     symbols = collect_tickers_from_stories(stories)
     for p in positions or []:
+        if is_option_instrument_type(p.get("instrument_type", "stock")):
+            continue
         t = (p.get("ticker") or "").strip().upper()
         if t:
             symbols.add(t)
@@ -37,6 +45,54 @@ def fetch_market_quotes(symbols: List[str]) -> dict[str, Any]:
         "as_of": as_of,
         "source": "yfinance (delayed/unofficial — same as Portfolio Value marks)",
         "quotes": quotes,
+    }
+
+
+def fetch_option_quotes(positions: Optional[List[dict]] = None) -> dict[str, Any]:
+    """Live option premiums for open option positions."""
+    as_of = store.utc_now_iso()
+    contracts: List[dict[str, Any]] = []
+    for p in positions or []:
+        if not is_option_instrument_type(p.get("instrument_type", "stock")):
+            continue
+        qty = float(p.get("quantity") or 0)
+        if qty <= 1e-9:
+            continue
+        mark_info = get_option_mark_for_position(p)
+        premium = mark_info.get("premium_per_share")
+        fetched_at = mark_info.get("fetched_at")
+        cost_basis = float(p.get("cost_basis") or 0)
+        market_value = float(p.get("market_value") or 0)
+        if premium is None or float(premium) <= 0:
+            premium = float(p.get("mark_price") or 0)
+            quote_available = False
+            fetched_at = None
+        else:
+            market_value = float(premium) * qty * OPTION_CONTRACT_MULTIPLIER
+            quote_available = True
+        unrealized = round(market_value - cost_basis, 2)
+        pnl_pct = round(unrealized / cost_basis * 100, 2) if cost_basis > 0 else 0.0
+        contracts.append(
+            {
+                "ticker": (p.get("ticker") or "").upper(),
+                "instrument_type": p.get("instrument_type"),
+                "strike": p.get("strike"),
+                "expiry": normalize_expiry(p.get("expiry")),
+                "right": option_right_from_instrument(p.get("instrument_type", "stock")),
+                "contracts": qty,
+                "premium_per_share": round(float(premium), 4) if premium else None,
+                "quote_as_of": fetched_at,
+                "market_value": round(market_value, 2),
+                "cost_basis": round(cost_basis, 2),
+                "unrealized_pnl": unrealized,
+                "unrealized_pnl_pct": pnl_pct,
+                "available": quote_available,
+            }
+        )
+    return {
+        "as_of": as_of,
+        "source": "yfinance option chain (delayed/unofficial)",
+        "contracts": contracts,
     }
 
 
@@ -72,13 +128,19 @@ def format_quotes_for_prompt(bundle: dict[str, Any]) -> str:
     return json.dumps(bundle, indent=2)
 
 
+def format_option_quotes_for_prompt(bundle: dict[str, Any]) -> str:
+    return json.dumps(bundle, indent=2)
+
+
 def merge_position_marks(
     bundle: dict[str, Any],
     positions: List[dict],
 ) -> dict[str, Any]:
-    """Prefer ledger mark on open positions when quote fetch failed."""
+    """Prefer ledger mark on open stock positions when quote fetch failed."""
     quotes = bundle.setdefault("quotes", {})
     for p in positions:
+        if is_option_instrument_type(p.get("instrument_type", "stock")):
+            continue
         sym = (p.get("ticker") or "").strip().upper()
         if not sym:
             continue

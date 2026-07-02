@@ -11,6 +11,8 @@ from core.instruments import (
     apply_buy_to_cash,
     apply_sell_to_cash,
     is_option_instrument_type,
+    normalize_expiry,
+    position_key,
     trade_notional,
 )
 from core.portfolio import compute_nav
@@ -125,7 +127,7 @@ def compute_daily_nav_series(
             qty = float(t["quantity"])
             price = float(t["price"])
             fees = float(t.get("fees") or 0)
-            key = f"{ticker}:{inst}"
+            key = position_key(ticker, inst, strike=t.get("strike"), expiry=t.get("expiry"))
 
             if key not in holdings:
                 holdings[key] = {
@@ -133,6 +135,8 @@ def compute_daily_nav_series(
                     "instrument_type": inst,
                     "quantity": 0.0,
                     "cost_basis_total": 0.0,
+                    "strike": t.get("strike"),
+                    "expiry": normalize_expiry(t.get("expiry")),
                 }
             h = holdings[key]
             if side == "buy":

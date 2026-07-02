@@ -20,7 +20,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { AlertTriangle, DollarSign, Plus, Wallet } from "lucide-react";
+import { AlertTriangle, DollarSign, Pencil, Plus, Wallet } from "lucide-react";
+import type { LedgerTrade } from "@/api/client";
 import type { PositionRow } from "@/lib/positionMetrics";
 
 export function LogTradeDialog({
@@ -33,9 +34,15 @@ export function LogTradeDialog({
 }: {
   portfolioId: number;
   onSaved: () => void;
-  preset?: { ticker?: string; instrument_type?: string; side?: string };
+  preset?: {
+    ticker?: string;
+    instrument_type?: string;
+    side?: string;
+    strike?: string;
+    expiry?: string;
+  };
   trigger?: React.ReactNode;
-  lockFields?: { ticker?: boolean; instrument_type?: boolean };
+  lockFields?: { ticker?: boolean; instrument_type?: boolean; strike?: boolean; expiry?: boolean };
   description?: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -46,6 +53,8 @@ export function LogTradeDialog({
     quantity: "",
     price: "",
     fees: "",
+    strike: preset?.strike ?? "",
+    expiry: preset?.expiry ?? "",
     note: "",
   });
   const [err, setErr] = useState("");
@@ -60,6 +69,8 @@ export function LogTradeDialog({
       quantity: "",
       price: "",
       fees: "",
+      strike: preset?.strike ?? "",
+      expiry: preset?.expiry ?? "",
       note: "",
     });
     setErr("");
@@ -71,7 +82,7 @@ export function LogTradeDialog({
     setErr("");
     setWarnings([]);
     try {
-      const res = await api.post<{ ok: boolean; violations?: { message: string }[] }>("/trades", {
+      const payload: Record<string, unknown> = {
         portfolio_id: portfolioId,
         side: form.side,
         ticker: form.ticker.toUpperCase(),
@@ -80,7 +91,16 @@ export function LogTradeDialog({
         price: parseFloat(form.price),
         fees: form.fees.trim() ? parseFloat(form.fees) : 0,
         note: form.note || undefined,
-      });
+      };
+      if (isOption) {
+        if (!form.strike.trim() || !form.expiry.trim()) {
+          setErr("Strike and expiry are required for options");
+          return;
+        }
+        payload.strike = parseFloat(form.strike);
+        payload.expiry = form.expiry.trim();
+      }
+      const res = await api.post<{ ok: boolean; violations?: { message: string }[] }>("/trades", payload);
       if (!res.ok) {
         setErr(res.violations?.map((v) => v.message).join("; ") || "Trade rejected");
         return;
@@ -109,6 +129,8 @@ export function LogTradeDialog({
             side: preset.side ?? f.side,
             ticker: preset.ticker ?? f.ticker,
             instrument_type: preset.instrument_type ?? f.instrument_type,
+            strike: preset.strike ?? f.strike,
+            expiry: preset.expiry ?? f.expiry,
           }));
         }
         if (!v) resetForm();
@@ -172,6 +194,33 @@ export function LogTradeDialog({
               className={lockFields?.ticker ? "bg-gray-50" : undefined}
             />
           </div>
+          {isOption && (
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>Strike ($)</Label>
+                <Input
+                  type="number"
+                  step="any"
+                  value={form.strike}
+                  onChange={(e) => setForm({ ...form, strike: e.target.value })}
+                  required
+                  readOnly={lockFields?.strike}
+                  className={lockFields?.strike ? "bg-gray-50" : undefined}
+                />
+              </div>
+              <div>
+                <Label>Expiry</Label>
+                <Input
+                  type="date"
+                  value={form.expiry}
+                  onChange={(e) => setForm({ ...form, expiry: e.target.value })}
+                  required
+                  readOnly={lockFields?.expiry}
+                  className={lockFields?.expiry ? "bg-gray-50" : undefined}
+                />
+              </div>
+            </div>
+          )}
           <div className="grid grid-cols-3 gap-4">
             <div>
               <Label>{isOption ? "Contracts" : "Quantity"}</Label>
@@ -249,6 +298,252 @@ export function LogTradeDialog({
       </div>
     )}
     </>
+  );
+}
+
+function toDatetimeLocalValue(iso: string): string {
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "";
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  } catch {
+    return iso.slice(0, 16);
+  }
+}
+
+function datetimeLocalToIso(value: string): string {
+  if (!value) return "";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toISOString();
+}
+
+export function EditTradeDialog({
+  ledgerEventId,
+  onSaved,
+  trigger,
+  label,
+}: {
+  ledgerEventId: number;
+  onSaved: () => void;
+  trigger?: React.ReactNode;
+  label?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [trade, setTrade] = useState<LedgerTrade | null>(null);
+  const [form, setForm] = useState({
+    quantity: "",
+    price: "",
+    fees: "",
+    strike: "",
+    expiry: "",
+    note: "",
+    logged_at: "",
+  });
+  const [err, setErr] = useState("");
+
+  const loadTrade = async () => {
+    setLoading(true);
+    setErr("");
+    try {
+      const t = await api.get<LedgerTrade>(`/trades/${ledgerEventId}`);
+      setTrade(t);
+      setForm({
+        quantity: String(t.quantity),
+        price: String(t.price),
+        fees: String(t.fees ?? 0),
+        strike: t.strike != null ? String(t.strike) : "",
+        expiry: t.expiry ? t.expiry.slice(0, 10) : "",
+        note: t.note ?? "",
+        logged_at: toDatetimeLocalValue(t.logged_at),
+      });
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const isOption = trade?.instrument_type.includes("option") ?? false;
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!trade) return;
+    setErr("");
+    try {
+      const payload: Record<string, unknown> = {
+        quantity: parseFloat(form.quantity),
+        price: parseFloat(form.price),
+        fees: form.fees.trim() ? parseFloat(form.fees) : 0,
+        note: form.note || null,
+        logged_at: form.logged_at ? datetimeLocalToIso(form.logged_at) : undefined,
+      };
+      if (isOption) {
+        if (!form.strike.trim() || !form.expiry.trim()) {
+          setErr("Strike and expiry are required for options");
+          return;
+        }
+        payload.strike = parseFloat(form.strike);
+        payload.expiry = form.expiry.trim();
+      }
+      const res = await api.patch<{ ok: boolean; reason?: string }>(`/trades/${ledgerEventId}`, payload);
+      if (!res.ok) {
+        setErr((res as { reason?: string }).reason || "Update failed");
+        return;
+      }
+      setOpen(false);
+      onSaved();
+    } catch (e) {
+      const raw = String(e);
+      try {
+        const parsed = JSON.parse(raw.replace(/^Error:\s*/, ""));
+        const detail = parsed.detail;
+        if (detail && typeof detail === "object" && "reason" in detail) {
+          setErr(String(detail.reason));
+        } else if (typeof detail === "string") {
+          setErr(detail);
+        } else {
+          setErr(raw);
+        }
+      } catch {
+        setErr(raw);
+      }
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(v) => {
+        setOpen(v);
+        if (v) loadTrade();
+        else {
+          setTrade(null);
+          setErr("");
+        }
+      }}
+    >
+      <DialogTrigger asChild>
+        {trigger ?? (
+          <Button variant="ghost" size="sm">
+            <Pencil className="w-4 h-4 mr-1" />
+            {label ?? "Edit"}
+          </Button>
+        )}
+      </DialogTrigger>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Edit trade</DialogTitle>
+          <DialogDescription>
+            Correct a logged trade. Portfolio cash and NAV update immediately after saving.
+          </DialogDescription>
+        </DialogHeader>
+        {loading ? (
+          <p className="text-sm text-gray-500 py-4">Loading trade…</p>
+        ) : trade ? (
+          <form onSubmit={submit} className="space-y-4">
+            <div className="rounded-md bg-gray-50 p-3 text-sm space-y-1">
+              <p>
+                <span className="text-gray-600">Action:</span>{" "}
+                <span className="font-medium capitalize">{trade.side}</span>{" "}
+                <span className="font-mono">{trade.ticker}</span>
+              </p>
+              <p>
+                <span className="text-gray-600">Instrument:</span>{" "}
+                {trade.instrument_type.replace("_", " ")}
+              </p>
+              {isOption && trade.strike != null && trade.expiry && (
+                <p>
+                  <span className="text-gray-600">Contract:</span> ${trade.strike} exp {trade.expiry.slice(0, 10)}
+                </p>
+              )}
+            </div>
+            {isOption && (
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <Label>Strike ($)</Label>
+                  <Input
+                    type="number"
+                    step="any"
+                    value={form.strike}
+                    onChange={(e) => setForm({ ...form, strike: e.target.value })}
+                    required
+                  />
+                </div>
+                <div>
+                  <Label>Expiry</Label>
+                  <Input
+                    type="date"
+                    value={form.expiry}
+                    onChange={(e) => setForm({ ...form, expiry: e.target.value })}
+                    required
+                  />
+                </div>
+              </div>
+            )}
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <Label>{isOption ? "Contracts" : "Quantity"}</Label>
+                <Input
+                  type="number"
+                  step="any"
+                  value={form.quantity}
+                  onChange={(e) => setForm({ ...form, quantity: e.target.value })}
+                  required
+                />
+              </div>
+              <div>
+                <Label>{isOption ? "Premium / share ($)" : "Fill price ($)"}</Label>
+                <Input
+                  type="number"
+                  step="any"
+                  value={form.price}
+                  onChange={(e) => setForm({ ...form, price: e.target.value })}
+                  required
+                />
+              </div>
+              <div>
+                <Label>Fees ($)</Label>
+                <Input
+                  type="number"
+                  step="any"
+                  value={form.fees}
+                  onChange={(e) => setForm({ ...form, fees: e.target.value })}
+                />
+              </div>
+            </div>
+            <div>
+              <Label>Trade date &amp; time</Label>
+              <Input
+                type="datetime-local"
+                value={form.logged_at}
+                onChange={(e) => setForm({ ...form, logged_at: e.target.value })}
+                required
+              />
+            </div>
+            <div>
+              <Label>Note</Label>
+              <Textarea
+                value={form.note}
+                onChange={(e) => setForm({ ...form, note: e.target.value })}
+                rows={2}
+              />
+            </div>
+            {err && <p className="text-sm text-red-600">{err}</p>}
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setOpen(false)}>
+                Cancel
+              </Button>
+              <Button type="submit">Save changes</Button>
+            </DialogFooter>
+          </form>
+        ) : (
+          err && <p className="text-sm text-red-600">{err}</p>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -378,6 +673,8 @@ export function ClosePositionDialog({
         quantity: parseFloat(quantity),
         note: note || undefined,
       };
+      if (position.strike != null) body.strike = position.strike;
+      if (position.expiry) body.expiry = position.expiry;
       if (resolution === "sell" && price.trim()) {
         body.price = parseFloat(price);
       }

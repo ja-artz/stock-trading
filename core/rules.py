@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, List, Optional
 from zoneinfo import ZoneInfo
 
-from core.instruments import is_option_instrument_type, trade_notional
+from core.instruments import find_open_position, is_option_instrument_type, trade_notional
 
 DEFAULT_RULES: dict[str, Any] = {
     "max_position_pct_nav": 33,
@@ -224,6 +224,8 @@ def validate_trade(
     is_new_position: bool,
     portfolio_id: Optional[int] = None,
     plan_item_id: Optional[int] = None,
+    strike: Optional[float] = None,
+    expiry: Optional[str] = None,
 ) -> List[RuleViolation]:
     violations: List[RuleViolation] = []
     side_l = side.lower()
@@ -272,7 +274,9 @@ def validate_trade(
             )
         max_pos_pct = rules.get("max_position_pct_nav", 33)
         max_pos_value = nav_usd * max_pos_pct / 100.0
-        current_pos = next((p for p in positions if p.get("ticker", "").upper() == ticker.upper()), None)
+        current_pos = find_open_position(positions, ticker, instrument_type, strike=strike, expiry=expiry)
+        if not current_pos:
+            current_pos = next((p for p in positions if p.get("ticker", "").upper() == ticker.upper()), None)
         current_val = 0.0
         if current_pos:
             current_val = float(current_pos.get("market_value") or 0)
@@ -305,7 +309,9 @@ def validate_trade(
             )
 
     if side_l == "sell" and quantity > 0:
-        pos = next((p for p in positions if p.get("ticker", "").upper() == ticker.upper()), None)
+        pos = find_open_position(positions, ticker, instrument_type, strike=strike, expiry=expiry)
+        if not pos:
+            pos = next((p for p in positions if p.get("ticker", "").upper() == ticker.upper()), None)
         if pos and quantity > abs(pos.get("quantity", 0)) + 1e-9:
             violations.append(RuleViolation("insufficient_qty", "Sell quantity exceeds position."))
 

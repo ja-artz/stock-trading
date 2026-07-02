@@ -16,7 +16,7 @@ from api.auth import require_api_key
 from api.staleness import plan_staleness_fields
 from core.plan_recency import enrich_plan_context_row, format_minutes_ago, minutes_since
 from core import store
-from core.ledger import deposit_cash, log_trade
+from core.ledger import deposit_cash, get_trade, log_trade, update_trade
 from core.position_close import close_position
 from core.portfolio_setup import clear_weekly_recommendations, fresh_start, reset_portfolio_to_cash
 from core.portfolio import compute_nav
@@ -71,6 +71,19 @@ class TradeRequest(BaseModel):
     weekly_plan_id: Optional[int] = None
 
 
+class UpdateTradeRequest(BaseModel):
+    quantity: Optional[float] = Field(default=None, gt=0)
+    price: Optional[float] = Field(default=None, ge=0)
+    fees: Optional[float] = Field(default=None, ge=0)
+    note: Optional[str] = None
+    strike: Optional[float] = Field(default=None, ge=0)
+    expiry: Optional[str] = None
+    logged_at: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp for when the trade was executed",
+    )
+
+
 class DecisionRequest(BaseModel):
     member_id: int = 1
     decision: str
@@ -116,6 +129,8 @@ class ClosePositionRequest(BaseModel):
     portfolio_id: int = 1
     ticker: str
     instrument_type: str = "stock"
+    strike: Optional[float] = None
+    expiry: Optional[str] = None
     resolution: str = Field(
         description="sell = sell stock or sell-to-close option; expire_worthless = option expires at $0"
     )
@@ -430,6 +445,31 @@ def post_trade(body: TradeRequest):
     return result
 
 
+@app.get("/trades/{ledger_event_id}", dependencies=[Depends(require_api_key)])
+def get_trade_event(ledger_event_id: int):
+    trade = get_trade(ledger_event_id)
+    if not trade:
+        raise HTTPException(404, detail="Trade not found")
+    return trade
+
+
+@app.patch("/trades/{ledger_event_id}", dependencies=[Depends(require_api_key)])
+def patch_trade(ledger_event_id: int, body: UpdateTradeRequest):
+    result = update_trade(
+        ledger_event_id,
+        quantity=body.quantity,
+        price=body.price,
+        fees=body.fees,
+        note=body.note,
+        strike=body.strike,
+        expiry=body.expiry,
+        logged_at=body.logged_at,
+    )
+    if not result.get("ok"):
+        raise HTTPException(400, detail=result)
+    return result
+
+
 class AssignLotTierRequest(BaseModel):
     portfolio_id: int = 1
     ticker: str
@@ -493,13 +533,21 @@ def assign_position_tier(body: AssignLotTierRequest):
 def get_portfolio_position(
     ticker: str = Query(..., min_length=1),
     instrument_type: str = Query("stock"),
+    strike: Optional[float] = Query(None),
+    expiry: Optional[str] = Query(None),
     portfolio_id: Optional[int] = None,
 ):
     from core.position_detail import get_position_detail
 
     pid = portfolio_id or _default_portfolio_id()
     try:
-        return get_position_detail(pid, ticker, instrument_type)
+        return get_position_detail(
+            pid,
+            ticker,
+            instrument_type,
+            strike=strike,
+            expiry=expiry,
+        )
     except ValueError as e:
         raise HTTPException(404, detail=str(e)) from e
 
@@ -566,6 +614,8 @@ def close_portfolio_position(body: ClosePositionRequest):
         resolution=body.resolution,
         quantity=body.quantity,
         price=body.price,
+        strike=body.strike,
+        expiry=body.expiry,
         member_id=body.member_id,
         note=body.note,
     )

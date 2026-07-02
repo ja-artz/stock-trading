@@ -8,12 +8,14 @@ import { ImportPositionsDialog } from "@/components/portfolio/ImportPositionsDia
 import { AddCashDialog, LogTradeDialog } from "@/components/portfolio/TradeDialogs";
 import {
   formatInstrumentType,
+  formatMarkSourceLabel,
   formatSignedPct,
   formatSignedUsd,
   formatUsd,
   pnlColorClass,
   portfolioPct,
   positionDetailPath,
+  positionRowKey,
   type PositionRow,
 } from "@/lib/positionMetrics";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -133,9 +135,10 @@ export function PortfolioPage() {
                   {state.positions.map((p) => {
                     const pnl = p.unrealized_pnl ?? 0;
                     const pnlPct = p.unrealized_pnl_pct ?? 0;
-                    const href = positionDetailPath(p.ticker, p.instrument_type);
+                    const markLabel = formatMarkSourceLabel(p);
+                    const href = positionDetailPath(p.ticker, p.instrument_type, p.strike, p.expiry);
                     return (
-                      <TableRow key={`${p.ticker}-${p.instrument_type}`} className="cursor-pointer hover:bg-gray-50">
+                      <TableRow key={positionRowKey(p)} className="cursor-pointer hover:bg-gray-50">
                         <TableCell className="font-mono font-medium">
                           <Link to={href} className="block">
                             <TickerDisplay symbol={p.ticker} companyName={p.company_name} />
@@ -143,7 +146,7 @@ export function PortfolioPage() {
                         </TableCell>
                         <TableCell className="text-sm text-gray-600">
                           <Link to={href} className="block">
-                            {formatInstrumentType(p.instrument_type, p.expiry)}
+                            {formatInstrumentType(p.instrument_type, p.expiry, p.strike)}
                           </Link>
                         </TableCell>
                         <TableCell className="text-right">
@@ -164,6 +167,9 @@ export function PortfolioPage() {
                         <TableCell className="text-right font-medium">
                           <Link to={href} className="block">
                             {formatUsd(p.market_value)}
+                            {markLabel && (
+                              <span className="block text-xs text-gray-500 font-normal">{markLabel}</span>
+                            )}
                           </Link>
                         </TableCell>
                         <TableCell className="text-right">
@@ -319,7 +325,7 @@ function DisciplinePanel({
           <div className="rounded border border-amber-200 bg-amber-50 p-3 text-sm">
             <p className="font-medium mb-2">Unmapped positions (assign tier)</p>
             {discipline.unmapped_positions.map((p) => (
-              <div key={`${p.ticker}-${p.instrument_type}`} className="flex items-center gap-2 py-1">
+              <div key={positionRowKey(p)} className="flex items-center gap-2 py-1">
                 <TickerDisplay symbol={p.ticker} companyName={p.company_name} />
                 {[1, 2, 3].map((t) => {
                   const def = getTierDefinition(t);

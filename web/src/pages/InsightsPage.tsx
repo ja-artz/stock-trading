@@ -32,6 +32,7 @@ import {
 } from "@/components/ui/table";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { TrendingUp, TrendingDown, FileText, Flame, Target, Shield, Info } from "lucide-react";
+import { EditTradeDialog } from "@/components/portfolio/TradeDialogs";
 import type {
   InsightsPerformance,
   InsightsPersonas,
@@ -412,6 +413,7 @@ export function InsightsPage() {
                             <TableHead>Personas</TableHead>
                             <TableHead>Followed rec</TableHead>
                             <TableHead className="text-right">Realized P&amp;L</TableHead>
+                            <TableHead className="w-24" />
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -462,6 +464,22 @@ export function InsightsPage() {
                                     ({trade.pnl_pct > 0 ? "+" : ""}
                                     {trade.pnl_pct.toFixed(2)}%)
                                   </span>
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <div className="flex flex-col gap-1">
+                                  <EditTradeDialog
+                                    ledgerEventId={trade.id}
+                                    onSaved={loadAnalytics}
+                                    label="Exit"
+                                  />
+                                  {trade.buy_ledger_event_id != null && (
+                                    <EditTradeDialog
+                                      ledgerEventId={trade.buy_ledger_event_id}
+                                      onSaved={loadAnalytics}
+                                      label="Entry"
+                                    />
+                                  )}
                                 </div>
                               </TableCell>
                             </TableRow>

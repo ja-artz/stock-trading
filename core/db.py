@@ -341,6 +341,12 @@ def _migrate_benchmark_snapshots(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_position_lot_strike(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(position_lots)").fetchall()}
+    if "strike" not in existing:
+        conn.execute("ALTER TABLE position_lots ADD COLUMN strike REAL")
+
+
 def init_db() -> None:
     with db_session() as conn:
         conn.executescript(_SCHEMA)
@@ -348,6 +354,7 @@ def init_db() -> None:
         _migrate_plan_item_tier_columns(conn)
         _migrate_tier_tables(conn)
         _migrate_benchmark_snapshots(conn)
+        _migrate_position_lot_strike(conn)
 
 
 def row_to_dict(row: Optional[sqlite3.Row]) -> Optional[dict[str, Any]]:
