@@ -1,0 +1,45 @@
+universe:
+  source: day_gainers
+  top_n: 50
+  min_percent_change: 3
+  min_market_cap: 5.0e7
+  max_market_cap: 10.0e10
+  min_price: 5
+  min_adv_20d: 20.0e6
+  max_avg_spread_bps: 15
+trigger:
+  move_threshold: 0.04
+  move_reference: open
+  velocity_threshold: null
+  slope_window_min: 15
+  rvol_threshold: 3.0
+  min_post_open_fraction: 0.5
+labels:
+  target_pct: 0.03
+  stop_pct: 0.015
+  # Fractional price change per minute (see velocity feature). null = disabled.
+  # Example: -0.001 exits when 15-min slope falls below -0.1%/min on average.
+  exit_velocity_threshold: -0.001
+execution:
+  max_positions: 3
+  timezone: America/Los_Angeles
+  scan_times:
+    - "06:45"
+    - "07:00"
+  entry_cutoff: "07:30"
+costs:
+  half_spread_bps: 5
+  slippage_bps: 5
+  cost_multiplier: 1.0
+validation:
+  holdout_months: 9
+  embargo_sessions: 1
+  purge: true
+prototype:
+  data_provider: yfinance
+  yfinance_rolling_window_days: 7
+  survivorship_safe: false
+  spread_source: modeled
+ingest:
+  daily_buffer_sessions: 1
+  min_bars_per_session: 300

@@ -1,0 +1,5 @@
+# Optional overrides for mover universe (not a ticker whitelist).
+# Tickers are discovered from top day gainers matching strategy.universe filters.
+
+include: []
+exclude: []
