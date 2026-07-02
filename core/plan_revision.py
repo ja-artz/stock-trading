@@ -55,6 +55,22 @@ def _item_to_dict(row: dict) -> dict:
     return normalize_plan_item_sizing(item)
 
 
+def _attach_rule_warnings(
+    item: dict,
+    viols: List[RuleViolation],
+    warnings: List[str],
+) -> None:
+    """Trading rules guide plans; chat revisions record violations as warnings only."""
+    if not viols:
+        return
+    existing = list(item.get("rule_warnings") or [])
+    for v in viols:
+        warnings.append(v.message)
+        if v.message not in existing:
+            existing.append(v.message)
+    item["rule_warnings"] = existing
+
+
 def _validate_item_proposal(
     item: dict,
     *,
@@ -122,19 +138,40 @@ def _validate_item_proposal(
     return violations
 
 
-def _check_change_allowed(item: dict, op: str) -> Optional[str]:
+def _status_change_warning(item: dict, op: str) -> Optional[str]:
+    """Advisory note when revising non-pending items via chat (never blocks)."""
     status = (item.get("status") or "pending").lower()
     if op == "remove":
         if status == "pending":
             return None
         if status == "accepted":
-            return "Cannot remove an accepted item; propose a trim/sell or opposing line item instead."
+            return "Removing an accepted item — consider a trim/sell line instead unless cleaning up."
         if status == "rejected":
-            return "Cannot remove a rejected item."
-        return f"Cannot remove item with status '{status}'."
-    if op == "update" and status == "rejected":
-        return "Rejected items cannot be edited unless the household explicitly asks to reconsider."
+            return "Removing a previously rejected item."
+        return f"Removing item with status '{status}'."
+    if op == "update":
+        if status == "rejected":
+            return "Updating a previously rejected item (household reconsideration via chat)."
+        if status == "accepted":
+            return "Updating an accepted item."
+        if status == "deferred":
+            return "Updating a deferred item."
     return None
+
+
+def _record_status_change_if_needed(
+    plan_item_id: int,
+    old_item: dict,
+    new_item: dict,
+    *,
+    summary: Optional[str] = None,
+) -> None:
+    new_status = (new_item.get("status") or "").lower()
+    old_status = (old_item.get("status") or "pending").lower()
+    if new_status not in ("accepted", "rejected", "deferred") or new_status == old_status:
+        return
+    note = f"Chat revision: {summary}" if summary else "Chat revision"
+    store.record_decision(plan_item_id, member_id=1, decision=new_status, note=note)
 
 
 def preview_plan_revision(
@@ -171,10 +208,9 @@ def preview_plan_revision(
                 errors.append(f"Unknown plan_item_id {pid}")
                 continue
             base = _item_to_dict(row)
-            err = _check_change_allowed(base, "update")
-            if err:
-                errors.append(err)
-                continue
+            warn = _status_change_warning(base, "update")
+            if warn:
+                warnings.append(warn)
             before.append({"op": op, "plan_item_id": pid, "item": copy.deepcopy(base)})
             patched = copy.deepcopy(base)
             patch = ch.get("patch") or {}
@@ -199,8 +235,7 @@ def preview_plan_revision(
                 new_pos_week=new_pos_week,
                 quote_bundle=quote_bundle,
             )
-            for v in viols:
-                (errors if v.severity == "error" else warnings).append(v.message)
+            _attach_rule_warnings(patched, viols, warnings)
             after.append({"op": op, "plan_item_id": pid, "item": patched})
 
         elif op == "add":
@@ -221,8 +256,7 @@ def preview_plan_revision(
                 new_pos_week=new_pos_week,
                 quote_bundle=quote_bundle,
             )
-            for v in viols:
-                (errors if v.severity == "error" else warnings).append(v.message)
+            _attach_rule_warnings(item, viols, warnings)
             after.append({"op": op, "item": item, "temp_key": ch.get("temp_key") or f"new_{len(after)}"})
 
         elif op == "remove":
@@ -232,10 +266,9 @@ def preview_plan_revision(
                 errors.append(f"Unknown plan_item_id {pid}")
                 continue
             base = _item_to_dict(row)
-            err = _check_change_allowed(base, "remove")
-            if err:
-                errors.append(err)
-                continue
+            warn = _status_change_warning(base, "remove")
+            if warn:
+                warnings.append(warn)
             before.append({"op": op, "plan_item_id": pid, "item": copy.deepcopy(base)})
             after.append({"op": op, "plan_item_id": pid, "removed": True})
             simulated.pop(pid, None)
@@ -266,11 +299,20 @@ def apply_plan_revision(
         return {"ok": False, "preview": preview, "errors": preview.get("errors")}
 
     applied: List[dict] = []
+    before_by_id = {
+        int(b["plan_item_id"]): b["item"]
+        for b in preview.get("before") or []
+        if b.get("plan_item_id") is not None
+    }
     for entry in preview.get("after") or []:
         op = entry.get("op")
         if op == "update":
             pid = int(entry["plan_item_id"])
+            old_item = before_by_id.get(pid) or {}
             store.update_plan_item(pid, portfolio_id, entry["item"])
+            _record_status_change_if_needed(
+                pid, old_item, entry["item"], summary=revision.get("summary")
+            )
             applied.append({"op": "update", "plan_item_id": pid})
         elif op == "add":
             new_id = store.insert_plan_item(weekly_plan_id, portfolio_id, entry["item"])

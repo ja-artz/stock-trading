@@ -225,7 +225,7 @@ def update_action_item_status(
         if status == "executed" and row["position_lot_id"]:
             from core.position_lots import record_partial_exit
 
-            record_partial_exit(int(row["position_lot_id"]), row["reason_code"])
+            record_partial_exit(int(row["position_lot_id"]), row["reason_code"], conn=conn)
         updated = conn.execute(
             "SELECT * FROM action_items WHERE id = ?",
             (action_item_id,),

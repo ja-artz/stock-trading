@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import date, datetime, timezone
 from typing import Any, List, Optional
 
@@ -240,9 +241,14 @@ def reduce_lot_on_sell(
             remaining -= take
 
 
-def record_partial_exit(lot_id: int, reason_code: str) -> None:
-    with db_session() as conn:
-        row = conn.execute(
+def record_partial_exit(
+    lot_id: int,
+    reason_code: str,
+    *,
+    conn: Optional[sqlite3.Connection] = None,
+) -> None:
+    def _apply(connection: sqlite3.Connection) -> None:
+        row = connection.execute(
             "SELECT partial_exits_json FROM position_lots WHERE id = ?",
             (lot_id,),
         ).fetchone()
@@ -254,10 +260,16 @@ def record_partial_exit(lot_id: int, reason_code: str) -> None:
             fired = []
         if reason_code not in fired:
             fired.append(reason_code)
-        conn.execute(
+        connection.execute(
             "UPDATE position_lots SET partial_exits_json = ? WHERE id = ?",
             (json.dumps(fired), lot_id),
         )
+
+    if conn is not None:
+        _apply(conn)
+        return
+    with db_session() as connection:
+        _apply(connection)
 
 
 def sync_lot_tiers_from_plans(portfolio_id: int) -> int:
