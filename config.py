@@ -24,11 +24,11 @@ ANALYST_PROFILES = ("aggressive", "moderate", "minimal_risk")
 # LLM Settings
 # Use a current, supported Anthropic Claude model ID
 # Latest balanced model as of March 2026
-ANTHROPIC_MODEL = "claude-sonnet-4-6"  # Claude Sonnet 4.6
+ANTHROPIC_MODEL = "claude-opus-5-5"  # Claude Sonnet 5.5
 # Retries for transient Anthropic errors (e.g. 529 overloaded, 429, 5xx)
 ANTHROPIC_MAX_RETRIES = 6
 ANTHROPIC_RETRY_BASE_DELAY_SEC = 2.0
-OPENAI_MODEL = "gpt-5-mini"  # Fallback or for structured data
+OPENAI_MODEL = "gpt-6-luna"  # Fallback or for structured data
 
 # Analysis Settings
 FOCUS_MARKETS = "US stocks and options"
